@@ -10,6 +10,7 @@ import {
 import type { PDFDocumentProxy } from 'pdfjs-dist';
 import { Annotator, readImageFile, type CommitReports, type Tool } from './annotate';
 import { api, type ServerDocumentDetail } from './api';
+import { canUseServer, initAuth } from './auth';
 import { rasterRotatedText } from './raster';
 import { buildSamplePdf } from './sample';
 import { $, ask, busy, downloadBytes, form, formatBytes, formatDate, setStatus, toast } from './ui';
@@ -579,6 +580,18 @@ async function checkServer(): Promise<void> {
   const badge = $('#server-status');
   badge.textContent = state.serverOnline ? '연결됨' : '오프라인';
   badge.className = `badge ${state.serverOnline ? 'online' : 'offline'}`;
+  if (state.serverOnline) await initAuth(onAuthChanged);
+  updateControls();
+  await refreshLibrary();
+}
+
+/** Login/logout: another account's documents must not stay on screen. */
+async function onAuthChanged(): Promise<void> {
+  if (!canUseServer() && state.server) {
+    state.server = undefined;
+    renderVersions();
+    await updateInfo();
+  }
   updateControls();
   await refreshLibrary();
 }
@@ -588,6 +601,10 @@ async function refreshLibrary(): Promise<void> {
   if (!state.serverOnline) {
     root.innerHTML =
       '<p class="muted">백엔드(NestJS)에 연결되지 않았습니다. 편집은 브라우저에서 그대로 쓸 수 있고, 서버 저장/버전 기록만 비활성화됩니다.</p>';
+    return;
+  }
+  if (!canUseServer()) {
+    root.replaceChildren();
     return;
   }
   try {
@@ -691,11 +708,39 @@ function renderVersions(): void {
             await refreshLibrary();
           });
         };
-        li.append(revert);
+        const del = document.createElement('button');
+        del.textContent = '삭제';
+        del.title = '이 버전과 저장된 파일을 서버에서 영구 삭제';
+        del.onclick = async () => {
+          if (!(await ask('버전 삭제', `v${v.version}을(를) 서버에서 영구 삭제할까요? 되돌릴 수 없습니다.`))) return;
+          await busy('버전 삭제', async () => {
+            state.server = await api.deleteVersion(doc.id, v.version);
+            renderVersions();
+          });
+        };
+        li.append(revert, del);
       }
       return li;
     }),
   );
+  if (doc.versions.length > 1) {
+    // Old versions keep whatever was redacted later; this is how to get rid of them.
+    const li = document.createElement('li');
+    const purge = document.createElement('button');
+    purge.textContent = '이전 버전 모두 삭제';
+    purge.onclick = async () => {
+      const count = doc.versions.length - 1;
+      if (!(await ask('이전 버전 모두 삭제', `현재 버전(v${doc.currentVersion})만 남기고 이전 버전 ${count}개를 영구 삭제할까요? 가린 내용이 남아 있는 옛 버전도 함께 지워집니다.`))) return;
+      await busy('이전 버전 삭제', async () => {
+        const result = await api.purgeVersions(doc.id);
+        state.server = result;
+        renderVersions();
+        toast(`이전 버전 ${result.deleted}개를 삭제했습니다.`);
+      });
+    };
+    li.append(purge);
+    list.append(li);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -704,7 +749,7 @@ function renderVersions(): void {
 
 function updateControls(): void {
   document.querySelectorAll<HTMLButtonElement | HTMLInputElement | HTMLSelectElement>('[data-needs-doc]').forEach((el) => {
-    el.disabled = !hasDoc() || (el.hasAttribute('data-needs-server') && !state.serverOnline);
+    el.disabled = !hasDoc() || (el.hasAttribute('data-needs-server') && !(state.serverOnline && canUseServer()));
   });
   $<HTMLButtonElement>('[data-action="undo"]').disabled = state.index <= 0;
   $<HTMLButtonElement>('[data-action="redo"]').disabled = state.index >= state.history.length - 1;
