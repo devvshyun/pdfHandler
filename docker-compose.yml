@@ -33,6 +33,8 @@ services:
       DB_PASSWORD: pdfhandler
       DB_NAME: pdfhandler
       REDIS_URL: redis://redis:6379
+      # Required (NODE_ENV=production): JWT_SECRET=$(openssl rand -hex 32) docker compose up
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET, e.g. JWT_SECRET=$$(openssl rand -hex 32) docker compose up}
       # Mount a TTF/OTF (e.g. NotoSansKR) and point here to allow Korean text in server-side operations.
       PDF_FONT_PATH: ''
     ports: ['3000:3000']
