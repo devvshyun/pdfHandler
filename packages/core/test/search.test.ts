@@ -171,6 +171,52 @@ describe('text map', () => {
     expect((await getTextMap(over, 0)).text).toBe('First\nOther');
   });
 
+  it('de-duplicates runs drawn twice (fake bold / shadow, e.g. HWP exports): one match, both copies redacted', async () => {
+    const doc = await PDFDocument.create();
+    const font = await doc.embedFont(StandardFonts.Helvetica);
+    const page = doc.addPage([600, 400]);
+    const lines: Array<[string, number]> = [
+      ['Hello... call 010-1234-5678 now', 300],
+      ['Second line stays', 280],
+    ];
+    for (const [text, y] of lines) {
+      page.drawText(text, { x: 50, y, size: 11, font });
+      page.drawText(text, { x: 50.3, y, size: 11, font }); // fake bold
+    }
+    // A shadow offset in both directions, drawn after everything else.
+    page.drawText('Shadowed 010-9999-8888', { x: 50, y: 200, size: 11, font });
+    page.drawText('Shadowed 010-9999-8888', { x: 50.6, y: 199.5, size: 11, font });
+    const bytes = await doc.save();
+    const map = await getTextMap(bytes, 0);
+    expect(map.text).toBe('Hello... call 010-1234-5678 now\nSecond line stays\nShadowed 010-9999-8888');
+    // Legitimate repeats ("ll", "...") are not mistaken for doubles.
+    expect(map.text).toContain('Hello...');
+    expect((await findText(bytes, 'call 010')).length).toBe(1);
+    const phones = await findText(bytes, TEXT_PATTERNS.find((p) => p.id === 'phone')!);
+    expect(phones.map((m) => m.text)).toEqual(['010-1234-5678', '010-9999-8888']);
+    // Each match carries both copies of its glyphs.
+    expect(phones[0].glyphs).toHaveLength(26);
+    expect(phones[1].glyphs).toHaveLength(26);
+    const { out, removed } = await redactAll(bytes, phones);
+    expect(removed).toBe(52);
+    const after = await pdfjsText(out);
+    expect(after).not.toMatch(/010|1234|5678|9999|8888/);
+    expect(after).toContain('Secondlinestays');
+    expect((await findText(out, 'call')).length).toBe(1);
+  });
+
+  it.skipIf(!existsSync(TTF))('de-duplicates doubled Type0 runs', async () => {
+    const doc = await PDFDocument.create();
+    doc.registerFontkit(fontkit);
+    const font = await doc.embedFont(readFileSync(TTF), { subset: true });
+    const page = doc.addPage([600, 400]);
+    page.drawText('Привет мир', { x: 50, y: 300, size: 9, font });
+    page.drawText('Привет мир', { x: 50.3, y: 300, size: 9, font });
+    const map = await getTextMap(await doc.save(), 0);
+    expect(map.text).toBe('Привет мир');
+    expect(map.glyphs.filter((g) => g.duplicate)).toHaveLength(10); // the space too
+  });
+
   it('keeps fake-bold double drawing out of the text but inside the match', async () => {
     const { bytes } = await rawPage('BT /F1 20 Tf 50 300 Td (Bold) Tj ET BT /F1 20 Tf 50.4 300 Td (Bold) Tj ET');
     const map = await getTextMap(bytes, 0);

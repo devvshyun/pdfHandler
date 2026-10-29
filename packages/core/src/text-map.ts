@@ -86,17 +86,22 @@ export function buildTextMap(doc: PDFDocument, pageIndex: number, decoders = new
   // one baseline), with overprinted twins set aside.
   const fragments: Fragment[] = [];
   const duplicates: Rec[] = [];
-  // Placed glyphs on a 2pt grid, for spotting glyphs drawn twice.
+  // Placed glyphs on a 4pt grid, for spotting glyphs drawn twice (offsets up to 4pt are found).
   const seen = new Map<number, Rec[]>();
   // Small-integer keys keep the map fast; distant cells may share a key, which only costs a compare.
   const cell = (cx: number, cy: number) => ((cx & 0x7fff) << 15) | (cy & 0x7fff);
-  const findTwin = (t: string, cx: number, cy: number, ox: number, oy: number, tolerance: number) => {
+  // A twin has the same text, sits on (nearly) the same baseline and is shifted along it by less
+  // than 40% of its width, i.e. the two boxes overlap over most of their width.
+  const findTwin = (t: string, cx: number, cy: number, ox: number, oy: number, dx: number, dy: number, along: number, across: number) => {
     for (let kx = -1; kx <= 1; kx++)
       for (let ky = -1; ky <= 1; ky++) {
         const list = seen.get(cell(cx + kx, cy + ky));
         if (!list) continue;
         for (const r of list) {
-          if (r.glyph.text === t && Math.abs(r.ox - ox) < tolerance && Math.abs(r.oy - oy) < tolerance) return r;
+          if (r.glyph.text !== t) continue;
+          const ux = ox - r.ox;
+          const uy = oy - r.oy;
+          if (Math.abs(dx * ux + dy * uy) < along && Math.abs(dx * uy - dy * ux) < across) return r;
         }
       }
     return undefined;
@@ -137,11 +142,10 @@ export function buildTextMap(doc: PDFDocument, pageIndex: number, decoders = new
     // Identical glyph drawn on (almost) the same spot: fake bold or a shadow. Keep it for its box,
     // but leave it out of the text so "Hello" drawn twice still reads "Hello". Only a glyph that
     // does not simply continue forward can repeat an earlier one, so only those are looked up.
-    const cx = Math.round(ox / 2);
-    const cy = Math.round(oy / 2);
-    const blank = t === ' ';
+    const cx = Math.round(ox / 4);
+    const cy = Math.round(oy / 4);
     const suspicious: boolean = newFragment || gap < -size * 0.05 || inDuplicateRun;
-    const twin: Rec | undefined = blank || !suspicious ? undefined : findTwin(t, cx, cy, ox, oy, size * 0.1);
+    const twin: Rec | undefined = !suspicious ? undefined : findTwin(t, cx, cy, ox, oy, dx, dy, Math.min(4, 0.4 * Math.max(advance, size * 0.25)), Math.min(4, size * 0.15));
     inDuplicateRun = !!twin;
     if (twin) {
       glyph.duplicate = true;
@@ -158,12 +162,9 @@ export function buildTextMap(doc: PDFDocument, pageIndex: number, decoders = new
     frag.tStart = Math.min(frag.tStart, t0);
     frag.tEnd = Math.max(frag.tEnd, t0 + advance);
     frag.size = Math.max(frag.size, size);
-    if (!blank) {
-      const k = cell(cx, cy);
-      const list = seen.get(k);
-      if (list) list.push(rec);
-      else seen.set(k, [rec]);
-    }
+    const list = seen.get(cell(cx, cy));
+    if (list) list.push(rec);
+    else seen.set(cell(cx, cy), [rec]);
     prev = { ox, oy, ex: ox + dx * advance, ey: oy + dy * advance, dx, dy, size };
   }
 
