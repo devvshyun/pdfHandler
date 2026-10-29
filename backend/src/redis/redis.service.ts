@@ -10,6 +10,13 @@ if redis.call('get', KEYS[1]) == ARGV[1] then
 end
 return 0`;
 
+const HIT_SCRIPT = `
+local c = redis.call('incr', KEYS[1])
+if c == 1 then redis.call('expire', KEYS[1], ARGV[1]) end
+local t = redis.call('ttl', KEYS[1])
+if t < 0 then redis.call('expire', KEYS[1], ARGV[1]); t = tonumber(ARGV[1]) end
+return {c, t}`;
+
 /**
  * Thin wrapper around ioredis providing a JSON cache and a simple distributed lock.
  * Cache calls never throw: if Redis is down the app keeps working straight from MySQL.
@@ -23,7 +30,7 @@ export class RedisService implements OnModuleDestroy {
   constructor(config: ConfigService<AppConfig, true>) {
     const redis = config.get('redis', { infer: true });
     this.defaultTtl = redis.cacheTtlSeconds;
-    this.client = new Redis(redis.url, { maxRetriesPerRequest: 1, lazyConnect: false });
+    this.client = new Redis(redis.url, { maxRetriesPerRequest: 1, lazyConnect: false, keyPrefix: redis.keyPrefix || undefined });
     this.client.on('error', (e) => this.logger.warn(`Redis error: ${e.message}`));
   }
 
@@ -99,6 +106,30 @@ export class RedisService implements OnModuleDestroy {
       if (acquired) {
         await this.client.eval(RELEASE_LOCK_SCRIPT, 1, lockKey, token).catch(() => undefined);
       }
+    }
+  }
+
+  /**
+   * Fixed-window counter: increments `key` and returns the new count and seconds until the window
+   * resets. Returns null when Redis is unavailable (callers fail open).
+   */
+  async hit(key: string, windowSeconds: number): Promise<{ count: number; resetSeconds: number } | null> {
+    try {
+      const [count, ttl] = (await this.client.eval(HIT_SCRIPT, 1, key, windowSeconds)) as [number, number];
+      return { count, resetSeconds: ttl > 0 ? ttl : windowSeconds };
+    } catch (e) {
+      this.logger.warn(`rate counter ${key} unavailable: ${(e as Error).message}`);
+      return null;
+    }
+  }
+
+  /** Current value of a counter written by `hit` (0 when absent or Redis is down). */
+  async count(key: string): Promise<{ count: number; resetSeconds: number }> {
+    try {
+      const [raw, ttl] = await Promise.all([this.client.get(key), this.client.ttl(key)]);
+      return { count: Number(raw ?? 0), resetSeconds: Math.max(ttl, 0) };
+    } catch {
+      return { count: 0, resetSeconds: 0 };
     }
   }
 
