@@ -74,12 +74,14 @@ const mul = (m: Matrix, n: Matrix): Matrix => [
 const apply = (m: Matrix, x: number, y: number) => ({ x: m[0] * x + m[2] * y + m[4], y: m[1] * x + m[3] * y + m[5] });
 
 function boxOf(m: Matrix, x1: number, y1: number, x2: number, y2: number): Rect {
-  const pts = [apply(m, x1, y1), apply(m, x2, y1), apply(m, x1, y2), apply(m, x2, y2)];
+  // Extents of the transformed corners, without intermediate arrays (called for every glyph).
+  const ax = m[0] * x1, bx = m[0] * x2, cx = m[2] * y1, dx = m[2] * y2;
+  const ay = m[1] * x1, by = m[1] * x2, cy = m[3] * y1, dy = m[3] * y2;
   return {
-    x1: Math.min(...pts.map((p) => p.x)),
-    y1: Math.min(...pts.map((p) => p.y)),
-    x2: Math.max(...pts.map((p) => p.x)),
-    y2: Math.max(...pts.map((p) => p.y)),
+    x1: Math.min(ax, bx) + Math.min(cx, dx) + m[4],
+    y1: Math.min(ay, by) + Math.min(cy, dy) + m[5],
+    x2: Math.max(ax, bx) + Math.max(cx, dx) + m[4],
+    y2: Math.max(ay, by) + Math.max(cy, dy) + m[5],
   };
 }
 
@@ -136,6 +138,41 @@ interface Ctx {
   /** Guards against Form XObjects that (directly or not) draw themselves. */
   formDepth: number;
   capture?: CapturedRun;
+  /** Read-only observer of every positioned glyph (see visitGlyphs). */
+  onGlyph?: (glyph: GlyphVisit) => void;
+}
+
+/** A glyph as the interpreter positions it; `box` and `trm` are in page user space. */
+export interface GlyphVisit {
+  code: number;
+  /** Byte length of the character code (distinguishes 1-byte from 2-byte codes). */
+  byteLength: number;
+  font: FontMetrics;
+  fontRaw?: PDFObject;
+  trm: Matrix;
+  /** Advance width of the glyph in text space (font size 1). */
+  width: number;
+  box: Rect;
+}
+
+function emptyReport(page: number): RedactionReport {
+  return {
+    page,
+    removedGlyphs: 0,
+    removedAnnotations: 0,
+    imagesOverlapping: 0,
+    imagesRedacted: 0,
+    imagesUnredacted: 0,
+    unredactedImageReasons: [],
+    removedHiddenTexts: 0,
+    approximateFonts: 0,
+  };
+}
+
+/** Calls `onGlyph` for every glyph drawn on the page (Form XObjects included), changing nothing. */
+export function visitGlyphs(doc: PDFDocument, page: PDFPage, onGlyph: (glyph: GlyphVisit) => void): void {
+  const ctx: Ctx = { doc, areas: [], mode: 'overlap', report: emptyReport(0), fontCache: new Map(), formDepth: 0, onGlyph };
+  processStream(ctx, pageContentBytes(page), page.node.Resources() ?? doc.context.obj({}), IDENTITY);
 }
 
 /** Redacts `areas` (page user space) on one page. */
@@ -147,17 +184,7 @@ export function redactPage(
   mode: HitMode,
   options: RedactPageOptions = {},
 ): RedactionReport & { capture?: CapturedRun; imageJobs: ImageJob[] } {
-  const report: RedactionReport = {
-    page: pageIndex,
-    removedGlyphs: 0,
-    removedAnnotations: 0,
-    imagesOverlapping: 0,
-    imagesRedacted: 0,
-    imagesUnredacted: 0,
-    unredactedImageReasons: [],
-    removedHiddenTexts: 0,
-    approximateFonts: 0,
-  };
+  const report = emptyReport(pageIndex);
   const ctx: Ctx = { doc, areas, mode, report, fontCache: new Map(), formDepth: 0 };
   ctx.images = options.images ? { codec: options.images.codec, jobs: [] } : undefined;
   ctx.sanitize = options.sanitize ?? false;
@@ -281,6 +308,7 @@ function processStream(ctx: Ctx, data: Uint8Array, resources: PDFDict, baseCtm: 
         const advance = (w * ts.Tfs + ts.Tc + (font.isSpace(code, end - start) ? ts.Tw : 0)) * ts.Th;
         const trm = mul([ts.Tfs * ts.Th, 0, 0, ts.Tfs, 0, ts.Trise], mul(Tm, gs.ctm));
         const box = boxOf(trm, 0, font.descent, w || 0.5, font.ascent);
+        ctx.onGlyph?.({ code, byteLength: end - start, font, fontRaw: ts.fontRaw, trm, width: w, box });
         const hit = ctx.areas.some((a) =>
           ctx.mode === 'center' ? contains(a, (box.x1 + box.x2) / 2, (box.y1 + box.y2) / 2) : overlaps(a, box),
         );

@@ -15,7 +15,8 @@ import { canUseServer, initAuth } from './auth';
 import { rasterRotatedText } from './raster';
 import { buildSamplePdf } from './sample';
 import { $, ask, busy, downloadBytes, form, formatBytes, formatDate, setStatus, toast } from './ui';
-import { extractText, openPdf, PasswordCancelledError, Thumbnails, Viewer, type OpenedPdf, type Zoom } from './viewer';
+import { FindPanel } from './find';
+import { openPdf, PasswordCancelledError, Thumbnails, Viewer, type OpenedPdf, type Zoom } from './viewer';
 
 // ---------------------------------------------------------------------------
 // State
@@ -34,7 +35,6 @@ interface State {
   server?: ServerDocumentDetail;
   serverOnline: boolean;
   selection: Set<number>;
-  texts?: string[];
   pdf?: PDFDocumentProxy;
   /** Password of the current document, kept only while it stays open. */
   password?: string;
@@ -84,11 +84,15 @@ const annotator = new Annotator({
     setStatus(message);
   },
 });
+const findPanel = new FindPanel({
+  viewer,
+  bytes: () => (hasDoc() ? current() : undefined),
+  commit: (ops, label) => commit(ops, label),
+});
 
 async function render(keepPage = viewer.current, opened?: OpenedPdf): Promise<void> {
   const { pdf } = opened ?? (await openPdf(current(), { password: state.password }));
   state.pdf = pdf;
-  state.texts = undefined;
   await viewer.load(pdf, keepPage);
   const items = thumbnails.load(pdf, viewer.sizes);
   items.forEach((item, i) => wireThumbnail(item, i));
@@ -97,6 +101,7 @@ async function render(keepPage = viewer.current, opened?: OpenedPdf): Promise<vo
   updateSelection();
   await updateInfo();
   updateControls();
+  findPanel.documentChanged();
 }
 
 function onPageChange(index: number): void {
@@ -582,47 +587,6 @@ async function updateInfo(): Promise<void> {
   );
 }
 
-async function search(query: string): Promise<void> {
-  const section = $('#search-section');
-  const list = $('#search-results');
-  query = query.trim();
-  if (!query || !state.pdf) {
-    section.hidden = true;
-    return;
-  }
-  state.texts ??= await extractText(state.pdf);
-  const needle = query.toLocaleLowerCase();
-  const hits: Array<{ page: number; before: string; match: string; after: string }> = [];
-  state.texts.forEach((text, page) => {
-    const hay = text.toLocaleLowerCase();
-    let at = hay.indexOf(needle);
-    while (at !== -1 && hits.length < 500) {
-      hits.push({
-        page,
-        before: text.slice(Math.max(0, at - 30), at),
-        match: text.slice(at, at + query.length),
-        after: text.slice(at + query.length, at + query.length + 30),
-      });
-      at = hay.indexOf(needle, at + needle.length);
-    }
-  });
-  section.hidden = false;
-  $('#search-count').textContent = `${hits.length}건`;
-  list.replaceChildren(
-    ...hits.map((h) => {
-      const li = document.createElement('li');
-      const page = document.createElement('strong');
-      page.textContent = `${h.page + 1}쪽 `;
-      const mark = document.createElement('mark');
-      mark.textContent = h.match;
-      li.append(page, `…${h.before}`, mark, `${h.after}…`);
-      li.onclick = () => viewer.scrollToPage(h.page);
-      return li;
-    }),
-  );
-  if (hits.length) viewer.scrollToPage(hits[0].page);
-}
-
 async function checkServer(): Promise<void> {
   state.serverOnline = await api.health();
   const badge = $('#server-status');
@@ -840,13 +804,6 @@ $<HTMLSelectElement>('#zoom').addEventListener('change', (e) => {
 $<HTMLInputElement>('#page-input').addEventListener('change', (e) => {
   const n = Number((e.target as HTMLInputElement).value);
   if (n >= 1 && n <= viewer.pageCount) viewer.scrollToPage(n - 1);
-});
-
-let searchTimer: number | undefined;
-$<HTMLInputElement>('#search-input').addEventListener('input', (e) => {
-  window.clearTimeout(searchTimer);
-  const q = (e.target as HTMLInputElement).value;
-  searchTimer = window.setTimeout(() => void search(q), 300);
 });
 
 document.addEventListener('keydown', (e) => {

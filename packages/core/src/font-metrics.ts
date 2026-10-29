@@ -301,7 +301,7 @@ export function makeEncoder(font: PDFDict): ((text: string) => TextElement[] | n
 }
 
 /** ToUnicode CMap → [unicode string, character code bytes]. */
-function parseToUnicode(data: Uint8Array): Array<[string, Uint8Array]> {
+export function parseToUnicode(data: Uint8Array): Array<[string, Uint8Array]> {
   const pairs: Array<[string, Uint8Array]> = [];
   const utf16 = (b: Uint8Array) => {
     let s = '';

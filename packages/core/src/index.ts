@@ -4,3 +4,5 @@ export * from './base64';
 export type { RedactionReport } from './redact';
 export type { ImageCodec, RasterImage } from './image-redact';
 export type { SanitizeReport } from './sanitize';
+export * from './text-map';
+export * from './search';

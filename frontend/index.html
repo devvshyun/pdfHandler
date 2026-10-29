@@ -109,8 +109,27 @@
           <h2>문서 정보</h2>
           <dl id="doc-info" class="info"><dt>파일</dt><dd>-</dd></dl>
         </section>
-        <section id="search-section" hidden>
-          <h2>검색 결과 <span id="search-count"></span></h2>
+        <section id="search-section" class="find" hidden>
+          <h2>찾기 · 바꾸기 <span id="search-count"></span></h2>
+          <div class="find-row">
+            <input id="find-query" type="search" placeholder="찾을 내용 (Ctrl+F)" aria-label="찾을 내용" />
+            <label class="opt" title="대/소문자 구분"><input id="find-case" type="checkbox" />Aa</label>
+          </div>
+          <div class="find-patterns" id="find-patterns" aria-label="개인정보 패턴 찾기"></div>
+          <div class="find-row">
+            <input id="find-replacement" type="text" placeholder="바꿀 내용 (비우면 글자만 지움)" aria-label="바꿀 내용" />
+          </div>
+          <div class="find-actions">
+            <button id="find-replace-selected" title="체크한 항목을 바꿀 내용으로 교체">선택 항목 바꾸기</button>
+            <button id="find-replace-all" title="찾은 항목을 모두 바꿀 내용으로 교체">모두 바꾸기</button>
+            <button id="find-redact-selected" class="danger" title="체크한 항목의 글자를 파일에서 지우고 검게 칠함">선택 항목 삭제</button>
+            <button id="find-redact-all" class="danger" title="찾은 항목의 글자를 모두 파일에서 지우고 검게 칠함">모두 삭제</button>
+          </div>
+          <p id="find-progress" class="find-progress" hidden></p>
+          <div class="find-meta">
+            <label class="opt"><input id="find-check-all" type="checkbox" />전체 선택</label>
+            <span id="find-selected-count"></span>
+          </div>
           <ol id="search-results" class="search-results"></ol>
         </section>
         <section>
