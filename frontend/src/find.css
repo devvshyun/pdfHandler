@@ -1,0 +1,122 @@
+/* Find / replace panel and the transient match boxes on the pages. */
+.find .find-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+.find input[type='search'],
+.find input[type='text'] {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+}
+
+.find .opt {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.find-patterns {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+
+.find-patterns button {
+  padding: 2px 7px;
+  font-size: 12px;
+}
+
+.find-patterns button.active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.find-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+
+.find-actions button {
+  padding: 3px 6px;
+  font-size: 12px;
+}
+
+.find-actions button.danger:not(:disabled) {
+  color: var(--accent);
+}
+
+.find-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+
+.find-progress {
+  font-size: 12px;
+  color: var(--muted);
+  margin: 0 0 6px;
+}
+
+.find .search-results {
+  max-height: 45vh;
+  overflow-y: auto;
+}
+
+.find .search-results li {
+  display: flex;
+  gap: 6px;
+  align-items: flex-start;
+  overflow-wrap: anywhere;
+}
+
+.find .search-results li.active {
+  background: var(--accent-soft);
+}
+
+.find .search-results li input {
+  margin-top: 3px;
+  flex: none;
+}
+
+.find .search-results .tag {
+  font-style: normal;
+  font-weight: normal;
+  font-size: 11px;
+  color: var(--muted);
+  margin-right: 4px;
+}
+
+.page .find-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+}
+
+.page .find-hit {
+  position: absolute;
+  background: rgba(255, 213, 0, 0.35);
+  outline: 1px solid rgba(214, 160, 0, 0.8);
+  border-radius: 1px;
+}
+
+.page .find-hit.active {
+  background: rgba(255, 120, 0, 0.4);
+  outline: 2px solid #e8590c;
+}
