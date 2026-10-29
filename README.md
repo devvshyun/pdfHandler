@@ -86,7 +86,7 @@ npm run dev:frontend                       # http://localhost:5173 (/api 는 300
 ### 테스트
 
 ```bash
-npm test          # core 31개(삭제 엔진 15개 포함) + backend 3개
+npm test          # core 30개(삭제 엔진 14개 포함) + backend 3개
 ```
 
 ## REST API
