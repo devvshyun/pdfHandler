@@ -248,3 +248,23 @@ export function hexString(bytes: Uint8Array): string {
   for (const b of bytes) s += b.toString(16).padStart(2, '0');
   return `${s}>`;
 }
+
+/** Writes an operand back in content-stream syntax (strings as hex, names escaped). */
+export function serializeOperand(v: Operand): string {
+  if (typeof v === 'number') return formatNumber(v);
+  if (typeof v === 'boolean') return String(v);
+  if (v === null) return 'null';
+  if (v instanceof Name) return `/${escapeName(v.value)}`;
+  if (v instanceof Str) return hexString(v.bytes);
+  if (v instanceof Dict) return `<<${[...v.entries].map(([k, val]) => `/${escapeName(k)} ${serializeOperand(val)}`).join(' ')}>>`;
+  return `[${v.map(serializeOperand).join(' ')}]`;
+}
+
+function escapeName(name: string): string {
+  let s = '';
+  for (let i = 0; i < name.length; i++) {
+    const c = name.charCodeAt(i);
+    s += c > 0x20 && c < 0x7f && isRegular(c) && c !== 0x23 ? name[i] : `#${c.toString(16).padStart(2, '0')}`;
+  }
+  return s;
+}

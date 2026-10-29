@@ -181,7 +181,7 @@ describe('redact: content stream operators', () => {
     expect(miss.report.removedGlyphs).toBe(0);
   });
 
-  it('reports images in the area without touching them', async () => {
+  it('redacts the pixels of images in the area (pdf-lib PNG: Flate RGB + SMask)', async () => {
     const doc = await PDFDocument.create();
     const page = doc.addPage([600, 400]);
     const png = await doc.embedPng(
@@ -189,7 +189,7 @@ describe('redact: content stream operators', () => {
     );
     page.drawImage(png, { x: 100, y: 100, width: 100, height: 100 });
     const { report } = await redact(await doc.save(), { page: 0, areas: [{ x: 120, y: 220, width: 20, height: 20 }] });
-    expect(report.imagesOverlapping).toBe(1);
+    expect(report).toMatchObject({ imagesOverlapping: 1, imagesRedacted: 1, imagesUnredacted: 0 });
   });
 });
 

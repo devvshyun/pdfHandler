@@ -42,7 +42,11 @@ frontend        Vite 앱: viewer(pdf.js) · annotate · raster · api · main
 1. 페이지 콘텐츠 스트림을 해석해 글자마다 실제 위치(텍스트 행렬 × CTM, 글꼴 폭)를 계산합니다. 표준 14 글꼴, TrueType/Type1, Type3, Type0(CID, Identity-H 및 내장 CMap)을 지원합니다.
 2. 영역에 걸친 글자를 `TJ` 문자열에서 빼고, 그 자리를 같은 폭의 이동값으로 바꿔 뒤 글자 위치가 그대로 유지됩니다. 바뀐 연산자만 다시 쓰고 나머지 바이트는 손대지 않습니다.
 3. Form XObject 안의 글자도 지우며, 다른 페이지가 같은 XObject를 쓰면 그 페이지는 원본을 유지합니다.
-4. 저장 전에 참조되지 않는 객체를 정리해, 교체된 원본 스트림이 파일에 남지 않게 합니다.
+4. 영역에 걸친 **이미지(스캔 문서)는 해당 픽셀을 덮어쓴 사본**으로 바꿉니다(`image-redact.ts`). 이미지 배치(단위 정사각형 × CTM)를 역변환해 회전·기울어진 이미지도 픽셀 단위로 계산하고, 다른 곳에서 쓰는 같은 이미지는 원본을 유지합니다. Flate/LZW/무압축(1·2·4·8·16비트, Gray/RGB/CMYK/ICC/Indexed 등, 이미지 마스크·SMask 포함)은 코어가 직접 처리하고, JPEG는 주입한 `imageCodec`으로 처리합니다(브라우저: `frontend/src/image-codec.ts`).
+5. `sanitize`(기본 켜짐): 지운 내용을 감싼 marked content와 구조 트리(태그 PDF) 요소의 `/ActualText`·`/Alt`·`/E`, 페이지 썸네일을 지웁니다. 겹친 입력란은 값과 함께 폼 필드 트리에서도 빠지고, 지운 주석의 팝업·답글도 함께 지웁니다.
+6. 저장 전에 참조되지 않는 객체를 정리해, 교체된 원본 스트림·이미지가 파일에 남지 않게 합니다.
+
+문서 속성·XMP·JavaScript·첨부파일·책갈피는 본문과 별개라 `redact`가 건드리지 않습니다. 별도 작업 `{ "type": "sanitize" }`(항목별 `removeMetadata`, `removeXmp`, `removeJavaScript`, `removeEmbeddedFiles`, `removeOutlines`, 기본 모두 true)로 지웁니다.
 
 ### 데이터 모델
 
@@ -88,7 +92,7 @@ npm run dev:frontend                       # http://localhost:5173 (/api 는 300
 ### 테스트
 
 ```bash
-npm test          # core 35개(삭제·텍스트 교체 19개 포함) + backend 3개
+npm test          # core 59개(삭제·이미지·sanitize·텍스트 교체 43개 포함) + backend 3개
 ```
 
 ## REST API
@@ -127,7 +131,7 @@ curl -X POST localhost:3000/api/documents/<id>/operations \
   }'
 ```
 
-지원 작업: `rotate`, `delete`, `reorder`, `extract`, `duplicate`, `insertBlank`, `watermark`, `pageNumbers`, `addText`, `addImage`, `redact`, `replaceText`, `metadata` — 타입 정의는 `packages/core/src/operations.ts` 참고.
+지원 작업: `rotate`, `delete`, `reorder`, `extract`, `duplicate`, `insertBlank`, `watermark`, `pageNumbers`, `addText`, `addImage`, `redact`, `replaceText`, `sanitize`, `metadata` — 타입 정의는 `packages/core/src/operations.ts` 참고.
 
 ## 환경 변수 (`backend/.env.example`)
 
@@ -146,9 +150,12 @@ curl -X POST localhost:3000/api/documents/<id>/operations \
 ## 한계와 다음 단계
 
 * 암호화된 PDF는 열람만 되고 편집은 거부됩니다(pdf-lib 제약).
-* **영역 삭제/텍스트 수정의 범위**: 페이지 본문과 그 안의 Form XObject에 있는 글자, 겹치는 주석·입력란 값은 파일에서 지워집니다. 다음은 지워지지 않으니 확인이 필요합니다.
-  * 스캔 이미지 속 글자(이미지는 검게 덮기만 함, 결과 메시지로 알림)
-  * 글자를 도형(패스)으로 그린 PDF, 문서 속성·책갈피·첨부파일의 텍스트
+* **영역 삭제의 범위**: 페이지 본문과 Form XObject의 글자, 이미지의 해당 픽셀, 겹치는 주석·입력란(값 포함), 관련 대체 텍스트(`/ActualText`·`/Alt`)는 파일에서 지워집니다. 텍스트 수정은 글자만 바꾸고 링크·입력란은 그대로 둡니다. 다음은 지워지지 않으니 확인이 필요합니다.
+  * 처리할 수 없는 이미지 형식(JBIG2, JPEG 2000, CCITT): 검게 덮기만 하고 결과 메시지에 형식과 함께 알립니다. **서버 API(Node)에는 JPEG 코덱이 없어** JPEG 이미지도 덮기만 합니다(`imagesUnredacted`로 보고). 브라우저에서는 JPEG도 픽셀을 지웁니다.
+  * 지운 픽셀은 채우기 색(기본 검정, `fill: null`이면 검정)으로 바뀝니다. 브라우저가 CMYK JPEG를 RGB로 디코딩하므로 그런 이미지는 RGB로 저장되고, 회색조 JPEG는 무손실(Flate)로 저장돼 파일이 커질 수 있습니다. 픽셀 경계는 바깥쪽으로 반올림됩니다.
+  * 색상 키 마스크(`/Mask` 배열)는 그대로 두고, 처리할 수 없는 SMask는 제거합니다(그 이미지는 불투명하게 보임).
+  * 글자를 도형(패스)으로 그린 PDF, 구조 트리의 `/T`(제목) 등 대체 텍스트 외 속성
+  * 문서 속성·XMP·책갈피·첨부파일·스크립트: `sanitize` 작업으로 따로 지웁니다.
   * 서버 문서함의 **이전 버전**: 원본이 그대로 보관되므로 민감 정보라면 문서를 새로 올리고 원본 문서를 삭제하세요.
 * 텍스트 수정은 **원본 글꼴에 필요한 글자가 모두 있으면 그 글꼴을 그대로** 씁니다(문서에 이미 쓰인 숫자·이름 수정 등). 없는 글자가 있으면 영문은 비슷한 표준 글꼴(Times/Helvetica, 굵기 반영), 한글은 이미지로 넣습니다.
 * 한 줄 안에서 굵기·색이 섞인 구간을 고치면 한 가지 스타일로 합쳐집니다. 줄바꿈은 다시 하지 않으므로, 줄 공간을 넘치면 글자 폭을 최대 60%까지 줄이고 그래도 넘치면 경고합니다.
