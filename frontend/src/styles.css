@@ -417,6 +417,11 @@ body:not([data-tool='select']) .page .overlay {
   cursor: crosshair;
 }
 
+/* Drawing tools own touch gestures on the page; select / edit-text keep native scrolling and zoom. */
+body:not([data-tool='select']):not([data-tool='edit-text']) .page .overlay {
+  touch-action: none;
+}
+
 body[data-tool='select'] .page .overlay,
 body[data-tool='edit-text'] .page .overlay {
   pointer-events: none;
@@ -621,6 +626,18 @@ body[data-tool='edit-text'] .textLayer span:hover {
 }
 
 #dirty {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.status-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.badge.readonly {
+  background: var(--accent-soft);
   color: var(--accent);
   font-weight: 600;
 }

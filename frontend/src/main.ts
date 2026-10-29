@@ -13,13 +13,15 @@ import { api, type ServerDocumentDetail } from './api';
 import { rasterRotatedText } from './raster';
 import { buildSamplePdf } from './sample';
 import { $, ask, busy, downloadBytes, form, formatBytes, formatDate, setStatus, toast } from './ui';
-import { extractText, openPdf, Thumbnails, Viewer, type Zoom } from './viewer';
+import { extractText, openPdf, PasswordCancelledError, Thumbnails, Viewer, type OpenedPdf, type Zoom } from './viewer';
 
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
 
 const MAX_HISTORY = 30;
+/** Undo history keeps whole copies of the file, so cap its total size too (oldest entries go first). */
+const MAX_HISTORY_BYTES = 300 * 1024 * 1024;
 
 interface State {
   history: Uint8Array[];
@@ -32,6 +34,10 @@ interface State {
   selection: Set<number>;
   texts?: string[];
   pdf?: PDFDocumentProxy;
+  /** Password of the current document, kept only while it stays open. */
+  password?: string;
+  /** Encrypted files open view-only: pdf-lib cannot edit them. */
+  readOnly: boolean;
   tool: Tool;
 }
 
@@ -42,6 +48,7 @@ const state: State = {
   fileName: 'document.pdf',
   serverOnline: false,
   selection: new Set(),
+  readOnly: false,
   tool: 'select',
 };
 
@@ -76,8 +83,8 @@ const annotator = new Annotator({
   },
 });
 
-async function render(keepPage = viewer.current): Promise<void> {
-  const pdf = await openPdf(current());
+async function render(keepPage = viewer.current, opened?: OpenedPdf): Promise<void> {
+  const { pdf } = opened ?? (await openPdf(current(), { password: state.password }));
   state.pdf = pdf;
   state.texts = undefined;
   await viewer.load(pdf, keepPage);
@@ -110,30 +117,66 @@ function onPageChange(index: number): void {
 async function openBytes(bytes: Uint8Array, fileName: string, server?: ServerDocumentDetail): Promise<void> {
   if (!isPdf(bytes)) throw new Error(`${fileName}은(는) PDF 파일이 아닙니다.`);
   if (isDirty() && !(await ask('새 파일 열기', '저장하지 않은 변경 사항이 있습니다. 버리고 새 파일을 열까요?'))) return;
+  // Open (and ask for a password) before touching the current document, so cancelling keeps it.
+  let opened: OpenedPdf;
+  try {
+    opened = await openPdf(bytes, { askPassword: (incorrect) => askPassword(fileName, incorrect) });
+  } catch (e) {
+    if (e instanceof PasswordCancelledError) return toast(e.message);
+    throw e;
+  }
   state.history = [bytes];
   state.index = 0;
   state.savedIndex = 0;
   state.fileName = fileName;
   state.server = server;
+  state.password = opened.password;
+  state.readOnly = opened.encrypted;
   state.selection.clear();
-  await render(0);
+  if (state.readOnly) setTool('select');
+  await render(0, opened);
   renderLibraryActive();
   renderVersions();
-  setStatus(`${fileName} 열림`);
+  setStatus(`${fileName} 열림${state.readOnly ? ' (보기 전용)' : ''}`);
+  if (state.readOnly) toast('암호화된 문서라 보기 전용으로 열었습니다. 편집하려면 암호를 해제한 파일을 여세요.');
+}
+
+function askPassword(fileName: string, incorrect: boolean): Promise<string | null> {
+  return form(
+    '암호로 보호된 PDF',
+    [{ name: 'password', label: '암호', type: 'password', required: true }],
+    incorrect ? '암호가 맞지 않습니다. 다시 입력하세요.' : `${fileName}을(를) 열려면 암호가 필요합니다.`,
+  ).then((values) => (values ? values.password : null));
 }
 
 /** Records a new document state and re-renders. */
 async function pushBytes(bytes: Uint8Array, label: string, keepPage = viewer.current): Promise<void> {
+  if (state.readOnly) throw new Error('암호화된 문서는 편집할 수 없습니다.');
   state.history = state.history.slice(0, state.index + 1);
+  // The saved state was on the redo branch just discarded; nothing in history matches it anymore.
+  if (state.savedIndex > state.index) state.savedIndex = -1;
   state.history.push(bytes);
-  if (state.history.length > MAX_HISTORY) {
-    const drop = state.history.length - MAX_HISTORY;
-    state.history.splice(0, drop);
-    state.savedIndex -= drop;
-  }
+  trimHistory();
   state.index = state.history.length - 1;
   await render(keepPage);
   toast(label);
+}
+
+/** Drops the oldest entries beyond MAX_HISTORY or MAX_HISTORY_BYTES, always keeping the latest two. */
+function trimHistory(): void {
+  let total = state.history.reduce((sum, b) => sum + b.byteLength, 0);
+  let drop = 0;
+  while (
+    state.history.length - drop > 2 &&
+    (state.history.length - drop > MAX_HISTORY || total > MAX_HISTORY_BYTES)
+  ) {
+    total -= state.history[drop].byteLength;
+    drop++;
+  }
+  if (!drop) return;
+  state.history.splice(0, drop);
+  // A dropped saved state can no longer be reached; -1 keeps the document marked dirty.
+  state.savedIndex = state.savedIndex >= drop ? state.savedIndex - drop : -1;
 }
 
 async function commit(ops: PdfOperation[], label: string, keepPage?: number): Promise<CommitReports> {
@@ -205,7 +248,9 @@ function wireThumbnail(item: HTMLDivElement, index: number): void {
     viewer.scrollToPage(index);
   });
 
+  item.draggable = !state.readOnly;
   item.addEventListener('dragstart', (e) => {
+    if (state.readOnly) return e.preventDefault();
     dragging = state.selection.has(index) ? [...state.selection].sort((a, b) => a - b) : [index];
     e.dataTransfer!.effectAllowed = 'move';
     e.dataTransfer!.setData('text/plain', dragging.join(','));
@@ -521,6 +566,7 @@ async function updateInfo(): Promise<void> {
   ];
   if (meta.Title) rows.push(['제목', meta.Title]);
   if (meta.Author) rows.push(['작성자', meta.Author]);
+  if (state.readOnly) rows.push(['보안', '암호화됨 (보기 전용)']);
   if (state.server) rows.push(['서버', `v${state.server.currentVersion} (${state.server.id.slice(0, 8)})`]);
   dl.replaceChildren(
     ...rows.flatMap(([k, v]) => {
@@ -704,10 +750,17 @@ function renderVersions(): void {
 
 function updateControls(): void {
   document.querySelectorAll<HTMLButtonElement | HTMLInputElement | HTMLSelectElement>('[data-needs-doc]').forEach((el) => {
-    el.disabled = !hasDoc() || (el.hasAttribute('data-needs-server') && !state.serverOnline);
+    el.disabled =
+      !hasDoc() ||
+      (el.hasAttribute('data-needs-server') && !state.serverOnline) ||
+      (el.hasAttribute('data-edits') && state.readOnly);
   });
-  $<HTMLButtonElement>('[data-action="undo"]').disabled = state.index <= 0;
-  $<HTMLButtonElement>('[data-action="redo"]').disabled = state.index >= state.history.length - 1;
+  document.querySelectorAll<HTMLButtonElement>('button[data-tool]').forEach((el) => {
+    el.disabled = state.readOnly && el.dataset.tool !== 'select';
+  });
+  $<HTMLButtonElement>('[data-action="undo"]').disabled = state.readOnly || state.index <= 0;
+  $<HTMLButtonElement>('[data-action="redo"]').disabled = state.readOnly || state.index >= state.history.length - 1;
+  $('#readonly').hidden = !(hasDoc() && state.readOnly);
   $('#page-total').textContent = `/ ${viewer.pageCount}`;
   $('#dirty').hidden = !isDirty();
   document.title = hasDoc() ? `${isDirty() ? '* ' : ''}${state.fileName} - pdfHandler` : 'pdfHandler';
@@ -723,6 +776,7 @@ document.addEventListener('click', (e) => {
 document.querySelectorAll<HTMLElement>('[data-tool]').forEach((b) =>
   b.addEventListener('click', async () => {
     const tool = b.dataset.tool as Tool;
+    if ((b as HTMLButtonElement).disabled) return;
     if (tool === 'image' && !(await annotator.armImage())) return;
     setTool(tool);
     if (tool === 'image') toast('이미지를 넣을 위치를 클릭하세요');
@@ -750,7 +804,8 @@ $<HTMLInputElement>('#search-input').addEventListener('input', (e) => {
 
 document.addEventListener('keydown', (e) => {
   const target = e.target as HTMLElement;
-  if (target.matches('input, textarea, select') || document.querySelector('dialog[open]')) return;
+  // Typing in a field, an inline text box or an open dialog must never trigger page shortcuts.
+  if (target.isContentEditable || target.closest('input, textarea, select, dialog') || document.querySelector('dialog[open]')) return;
   const mod = e.ctrlKey || e.metaKey;
   const run = (name: string) => {
     e.preventDefault();
@@ -765,7 +820,7 @@ document.addEventListener('keydown', (e) => {
     e.preventDefault();
     state.selection = new Set(Array.from({ length: viewer.pageCount }, (_, i) => i));
     updateSelection();
-  } else if (!mod && (e.key === 'Delete' || e.key === 'Backspace') && hasDoc()) run('delete');
+  } else if (!mod && e.key === 'Delete' && !e.repeat && hasDoc()) run('delete');
   else if (!mod && (e.key === '+' || e.key === '=')) run('zoom-in');
   else if (!mod && e.key === '-') run('zoom-out');
   else if (!mod && (e.key === 'PageDown' || e.key === 'ArrowRight')) run('next');

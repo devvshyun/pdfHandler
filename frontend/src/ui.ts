@@ -36,7 +36,7 @@ export async function busy<T>(label: string, fn: () => Promise<T>): Promise<T | 
 }
 
 export type Field =
-  | { name: string; label: string; type: 'text' | 'number' | 'color'; value?: string | number; placeholder?: string; min?: number; max?: number; step?: number; required?: boolean }
+  | { name: string; label: string; type: 'text' | 'password' | 'number' | 'color'; value?: string | number; placeholder?: string; min?: number; max?: number; step?: number; required?: boolean }
   | { name: string; label: string; type: 'select'; value?: string; options: Array<[string, string]> }
   | { name: string; label: string; type: 'textarea'; value?: string; placeholder?: string };
 
