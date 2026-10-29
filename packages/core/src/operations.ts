@@ -56,6 +56,21 @@ export type PdfOperation =
       opacity?: number;
     }
   | {
+      /**
+       * Permanently removes the text inside `areas` from the page content (not just covers it).
+       * Areas use the same visual, top-left-origin coordinates as addImage.
+       */
+      type: 'redact';
+      page: number;
+      areas: Array<{ x: number; y: number; width: number; height: number }>;
+      /** `overlap` (default): any glyph touching an area. `center`: glyphs centred inside. */
+      mode?: 'overlap' | 'center';
+      /** Box painted over each area afterwards; default black, `null` for none. */
+      fill?: RgbColor | null;
+      /** Painted only when no glyph was found to remove (e.g. text that is part of an image). */
+      coverIfUntouched?: RgbColor;
+    }
+  | {
       type: 'metadata';
       title?: string;
       author?: string;
@@ -76,6 +91,7 @@ export const OPERATION_TYPES: readonly PdfOperationType[] = [
   'pageNumbers',
   'addText',
   'addImage',
+  'redact',
   'metadata',
 ] as const;
 

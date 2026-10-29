@@ -1,20 +1,22 @@
 // Annotation tools. Everything is flattened into the PDF as images via the `addImage` operation,
 // so the result looks identical in every viewer and supports any language.
-import { bytesToBase64, type PdfOperation } from '@pdfhandler/core';
+import { bytesToBase64, type PdfOperation, type RedactionReport } from '@pdfhandler/core';
 import { rasterShape, rasterStroke, rasterText, type ShapeKind, type Stroke } from './raster';
 import type { Viewer } from './viewer';
 
-export type Tool = 'select' | 'edit-text' | 'text' | 'pen' | 'highlight' | 'rect' | 'whiteout' | 'image';
+export type Tool = 'select' | 'edit-text' | 'redact' | 'text' | 'pen' | 'highlight' | 'rect' | 'whiteout' | 'image';
 
 export interface AnnotatorHost {
   viewer: Viewer;
   tool(): Tool;
   color(): string;
   size(): number;
-  commit(ops: PdfOperation[], label: string): Promise<void>;
+  /** Applies the operations; resolves with what any `redact` operation removed. */
+  commit(ops: PdfOperation[], label: string): Promise<RedactionReport[]>;
   pickImage(): Promise<{ base64: string; width: number; height: number } | null>;
   resetTool(): void;
   toast(message: string): void;
+  notify(message: string): void;
 }
 
 export class Annotator {
@@ -41,7 +43,8 @@ export class Annotator {
         case 'highlight':
         case 'rect':
         case 'whiteout':
-          return this.startShape(index, overlay, e, this.host.tool() as ShapeKind);
+        case 'redact':
+          return this.startShape(index, overlay, e, this.host.tool() as ShapeKind | 'redact');
         case 'image':
           return void this.placeImage(index, e);
       }
@@ -96,9 +99,9 @@ export class Annotator {
   }
 
   /**
-   * Replaces a run of existing text: the original is covered with a box in the sampled background
-   * colour and the new text is drawn on top in the sampled text colour. The original glyphs stay in
-   * the file underneath, so this is not a redaction.
+   * Replaces a run of existing text: its glyphs are removed from the page content (`redact`) and the
+   * new text is drawn in the same place in the sampled ink colour. If the run cannot be found in the
+   * content (e.g. it is part of an image) the area is covered in the sampled background colour instead.
    */
   private startEditText(index: number, span: HTMLElement): void {
     if (document.querySelector('.inline-text')) return;
@@ -146,10 +149,16 @@ export class Annotator {
       input.remove();
       if (!save || text === original) return;
       const pad = Math.max(1, fontSize * 0.08);
-      // A solid fill in the sampled background colour (also works on tinted backgrounds).
-      const cover = await rasterShape('highlight', box.width + pad * 2, box.height + pad * 2, colors.bg, 0);
       const ops: PdfOperation[] = [
-        { type: 'addImage', page: index, x: box.x - pad, y: box.y - pad, width: box.width + pad * 2, height: box.height + pad * 2, imageBase64: cover },
+        {
+          type: 'redact',
+          page: index,
+          areas: [{ x: box.x - pad, y: box.y - pad, width: box.width + pad * 2, height: box.height + pad * 2 }],
+          // Only glyphs centred in the run: neighbours that the box grazes stay.
+          mode: 'center',
+          fill: null,
+          coverIfUntouched: hexToRgb(colors.bg),
+        },
       ];
       if (text) {
         if (/^[\x20-\x7e\n]*$/.test(text) && !serif) {
@@ -162,7 +171,10 @@ export class Annotator {
           ops.push({ type: 'addImage', page: index, x: box.x - 1, y: box.y - fontSize * 0.125 - (box.height - fontSize) / 2, width: img.width, height: img.height, imageBase64: img.base64 });
         }
       }
-      await this.host.commit(ops, text ? '텍스트 수정' : '텍스트 삭제');
+      const [report] = await this.host.commit(ops, text ? '텍스트 수정' : '텍스트 삭제');
+      if (report && report.removedGlyphs === 0) {
+        this.host.toast('원본 글자를 찾지 못해 배경색으로 덮었습니다(이미지 속 글자일 수 있습니다).');
+      }
     };
     input.addEventListener('blur', () => void finish(true));
     input.addEventListener('keydown', (k) => {
@@ -220,7 +232,7 @@ export class Annotator {
     overlay.addEventListener('pointerup', up);
   }
 
-  private startShape(index: number, overlay: HTMLDivElement, e: PointerEvent, kind: ShapeKind): void {
+  private startShape(index: number, overlay: HTMLDivElement, e: PointerEvent, kind: ShapeKind | 'redact'): void {
     e.preventDefault();
     const { viewer } = this.host;
     const color = this.host.color();
@@ -231,6 +243,7 @@ export class Annotator {
     box.style.cssText = 'position:absolute;pointer-events:none;box-sizing:border-box';
     if (kind === 'highlight') box.style.background = hexAlpha(color, 0.35);
     else if (kind === 'whiteout') box.style.cssText += ';background:#fff;outline:1px dashed #999';
+    else if (kind === 'redact') box.style.cssText += ';background:rgba(0,0,0,0.55);outline:2px dashed #d93025';
     else box.style.border = `${stroke * viewer.scale}px solid ${color}`;
     overlay.append(box);
 
@@ -257,6 +270,12 @@ export class Annotator {
       const width = Math.abs(end.x - start.x);
       const height = Math.abs(end.y - start.y);
       if (width < 3 || height < 3) return box.remove();
+      if (kind === 'redact') {
+        const [report] = await this.host.commit([{ type: 'redact', page: index, areas: [{ x, y, width, height }] }], '영역 삭제');
+        box.remove();
+        if (report) this.host.notify(describeRedaction(report));
+        return;
+      }
       const base64 = await rasterShape(kind, width, height, color, stroke);
       await this.host.commit(
         [
@@ -301,6 +320,14 @@ export class Annotator {
     );
     this.host.resetTool();
   }
+}
+
+function describeRedaction(r: RedactionReport): string {
+  const parts = [r.removedGlyphs ? `글자 ${r.removedGlyphs}개를 파일에서 삭제` : '삭제할 글자 없음'];
+  if (r.removedAnnotations) parts.push(`주석·입력란 ${r.removedAnnotations}개 삭제`);
+  if (r.imagesOverlapping) parts.push(`이미지 ${r.imagesOverlapping}개는 검게 덮기만 함(이미지 속 글자는 남음)`);
+  if (r.approximateFonts) parts.push('일부 글꼴은 위치를 추정함(가장자리 확인 필요)');
+  return parts.join(' · ');
 }
 
 /** Picks the background (most common edge colour) and ink (furthest from it) under a text run. */

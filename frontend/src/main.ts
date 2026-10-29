@@ -6,6 +6,7 @@ import {
   parsePageRanges,
   splitPdf,
   type PdfOperation,
+  type RedactionReport,
 } from '@pdfhandler/core';
 import type { PDFDocumentProxy } from 'pdfjs-dist';
 import { Annotator, readImageFile, type Tool } from './annotate';
@@ -70,6 +71,10 @@ const annotator = new Annotator({
   pickImage: () => pickFile('#file-image').then((files) => (files[0] ? readImageFile(files[0]) : null)),
   resetTool: () => setTool('select'),
   toast: (message) => toast(message, 'error'),
+  notify: (message) => {
+    toast(message);
+    setStatus(message);
+  },
 });
 
 async function render(keepPage = viewer.current): Promise<void> {
@@ -132,11 +137,13 @@ async function pushBytes(bytes: Uint8Array, label: string, keepPage = viewer.cur
   toast(label);
 }
 
-async function commit(ops: PdfOperation[], label: string, keepPage?: number): Promise<void> {
+async function commit(ops: PdfOperation[], label: string, keepPage?: number): Promise<RedactionReport[]> {
+  const reports: RedactionReport[] = [];
   await busy(label, async () => {
-    const out = await applyOperations(current(), ops);
+    const out = await applyOperations(current(), ops, { onRedaction: (r) => reports.push(r) });
     await pushBytes(out, label, keepPage);
   });
+  return reports;
 }
 
 async function undo(): Promise<void> {
@@ -718,6 +725,7 @@ document.querySelectorAll<HTMLElement>('[data-tool]').forEach((b) =>
     setTool(tool);
     if (tool === 'image') toast('이미지를 넣을 위치를 클릭하세요');
     if (tool === 'edit-text') toast('고칠 텍스트를 클릭하세요 (Enter 적용, Esc 취소)');
+    if (tool === 'redact') toast('지울 영역을 드래그하세요. 안의 글자가 파일에서 완전히 삭제됩니다');
   }),
 );
 

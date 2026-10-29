@@ -17,7 +17,8 @@
 | 보기 | 연속 스크롤, 폭/쪽 맞춤·배율, 썸네일, 쪽 이동, 텍스트 선택·복사, 문서 내 검색 |
 | 쪽 편집 | 회전, 삭제, 복제, 빈 쪽 삽입, 썸네일 드래그로 순서 변경(다중 선택 지원) |
 | 문서 작업 | 병합, 분할(N쪽마다/범위), 쪽 추출, 워터마크, 쪽 번호, 문서 속성 |
-| 텍스트 수정 | 기존 텍스트를 클릭해 고치기 (배경색으로 덮고 같은 위치·색으로 새 글자 배치) |
+| 텍스트 수정 | 기존 텍스트를 클릭해 고치기 (원본 글자를 파일에서 지우고 같은 위치·색으로 새 글자 배치) |
+| 영역 삭제 | 드래그한 영역의 글자를 파일에서 완전히 삭제(redaction)하고 검게 칠함 |
 | 주석 | 텍스트, 펜, 형광펜, 사각형, 가리기(흰색), 이미지/서명 |
 | 기타 | 실행 취소/다시 실행(30단계), 드래그&드롭 열기, 단축키, 다크 모드 |
 | 서버 | 문서함, 버전 기록·복원, 서버 측 작업 API, 무상태 도구 API |
@@ -33,6 +34,13 @@ packages/core   pdf-lib 기반 작업 엔진 (브라우저·서버 공용) + 단
 backend         NestJS API (documents, tools, health), MikroORM 엔티티/마이그레이션, Redis
 frontend        Vite 앱: viewer(pdf.js) · annotate · raster · api · main
 ```
+
+### 영역 삭제(redaction) 엔진 — `packages/core/src/redact.ts`
+
+1. 페이지 콘텐츠 스트림을 해석해 글자마다 실제 위치(텍스트 행렬 × CTM, 글꼴 폭)를 계산합니다. 표준 14 글꼴, TrueType/Type1, Type3, Type0(CID, Identity-H 및 내장 CMap)을 지원합니다.
+2. 영역에 걸친 글자를 `TJ` 문자열에서 빼고, 그 자리를 같은 폭의 이동값으로 바꿔 뒤 글자 위치가 그대로 유지됩니다. 바뀐 연산자만 다시 쓰고 나머지 바이트는 손대지 않습니다.
+3. Form XObject 안의 글자도 지우며, 다른 페이지가 같은 XObject를 쓰면 그 페이지는 원본을 유지합니다.
+4. 저장 전에 참조되지 않는 객체를 정리해, 교체된 원본 스트림이 파일에 남지 않게 합니다.
 
 ### 데이터 모델
 
@@ -78,7 +86,7 @@ npm run dev:frontend                       # http://localhost:5173 (/api 는 300
 ### 테스트
 
 ```bash
-npm test          # core 16개 + backend 3개
+npm test          # core 31개(삭제 엔진 15개 포함) + backend 3개
 ```
 
 ## REST API
@@ -117,7 +125,7 @@ curl -X POST localhost:3000/api/documents/<id>/operations \
   }'
 ```
 
-지원 작업: `rotate`, `delete`, `reorder`, `extract`, `duplicate`, `insertBlank`, `watermark`, `pageNumbers`, `addText`, `addImage`, `metadata` — 타입 정의는 `packages/core/src/operations.ts` 참고.
+지원 작업: `rotate`, `delete`, `reorder`, `extract`, `duplicate`, `insertBlank`, `watermark`, `pageNumbers`, `addText`, `addImage`, `redact`, `metadata` — 타입 정의는 `packages/core/src/operations.ts` 참고.
 
 ## 환경 변수 (`backend/.env.example`)
 
@@ -136,6 +144,10 @@ curl -X POST localhost:3000/api/documents/<id>/operations \
 ## 한계와 다음 단계
 
 * 암호화된 PDF는 열람만 되고 편집은 거부됩니다(pdf-lib 제약).
-* 텍스트 수정은 원본 글자를 배경색 상자로 덮고 새 글자를 올리는 방식입니다. **원본 글자는 파일 안에 그대로 남아** 검색·복사로 보일 수 있으므로 개인정보 삭제(redaction) 용도로 쓰면 안 됩니다. 영문은 Helvetica 실제 텍스트로, 한글은 이미지로 들어가며 원래 글꼴은 유지되지 않습니다.
+* **영역 삭제/텍스트 수정의 범위**: 페이지 본문과 그 안의 Form XObject에 있는 글자, 겹치는 주석·입력란 값은 파일에서 지워집니다. 다음은 지워지지 않으니 확인이 필요합니다.
+  * 스캔 이미지 속 글자(이미지는 검게 덮기만 함, 결과 메시지로 알림)
+  * 글자를 도형(패스)으로 그린 PDF, 문서 속성·책갈피·첨부파일의 텍스트
+  * 서버 문서함의 **이전 버전**: 원본이 그대로 보관되므로 민감 정보라면 문서를 새로 올리고 원본 문서를 삭제하세요.
+* 새로 쓰는 글자는 영문이면 Helvetica 실제 텍스트, 한글이면 이미지로 들어가 원래 글꼴과 다를 수 있습니다.
 * 파일 저장소는 로컬 디스크입니다. `StorageService`만 교체하면 S3 등으로 옮길 수 있습니다.
 * 인증/권한이 없습니다. 외부에 공개하려면 인증 계층을 먼저 추가하세요.

@@ -9,10 +9,13 @@ import {
 } from 'pdf-lib';
 import { base64ToBytes } from './base64';
 import { PdfOperation, PdfOperationError, RgbColor } from './operations';
+import { collectGarbage, RedactionReport, redactPage } from './redact';
 
 export interface ApplyOptions {
   /** TTF/OTF bytes used for text operations. Needed for non-Latin text (e.g. Korean). */
   font?: Uint8Array;
+  /** Receives what each `redact` operation removed (and what it could not). */
+  onRedaction?: (report: RedactionReport) => void;
 }
 
 export interface PdfPageInfo {
@@ -82,8 +85,10 @@ export async function applyOperations(
   const fonts = new FontCache(options.font);
 
   for (const op of operations) {
-    doc = await applyOne(doc, op, fonts);
+    doc = await applyOne(doc, op, fonts, options);
   }
+  // Redaction must not leave the replaced streams behind as unreferenced objects.
+  if (operations.some((op) => op.type === 'redact')) collectGarbage(doc);
 
   doc.setProducer(PRODUCER);
   doc.setModificationDate(new Date());
@@ -151,7 +156,7 @@ export function parsePageRanges(input: string, pageCount: number): number[] {
 
 // ---------------------------------------------------------------------------
 
-async function applyOne(doc: PDFDocument, op: PdfOperation, fonts: FontCache): Promise<PDFDocument> {
+async function applyOne(doc: PDFDocument, op: PdfOperation, fonts: FontCache, options: ApplyOptions): Promise<PDFDocument> {
   const count = doc.getPageCount();
   switch (op.type) {
     case 'rotate': {
@@ -275,6 +280,30 @@ async function applyOne(doc: PDFDocument, op: PdfOperation, fonts: FontCache): P
         opacity: op.opacity ?? 1,
         rotate: degrees(pageRotation(page)),
       });
+      return doc;
+    }
+    case 'redact': {
+      assertPages([op.page], count);
+      if (!Array.isArray(op.areas) || op.areas.length === 0) throw new PdfOperationError('redact.areas가 비어 있습니다.');
+      const page = doc.getPage(op.page);
+      const v = visualSize(page);
+      const areas = op.areas.map((a) => {
+        if (![a.x, a.y, a.width, a.height].every(Number.isFinite) || a.width <= 0 || a.height <= 0) {
+          throw new PdfOperationError('redact 영역의 좌표가 올바르지 않습니다.');
+        }
+        const p1 = visualToUser(page, a.x, v.height - a.y);
+        const p2 = visualToUser(page, a.x + a.width, v.height - a.y - a.height);
+        return { x1: Math.min(p1.x, p2.x), y1: Math.min(p1.y, p2.y), x2: Math.max(p1.x, p2.x), y2: Math.max(p1.y, p2.y) };
+      });
+      const report = redactPage(doc, page, op.page, areas, op.mode ?? 'overlap');
+      const fill = op.fill === undefined ? { r: 0, g: 0, b: 0 } : op.fill;
+      const paint = fill ?? (report.removedGlyphs === 0 ? op.coverIfUntouched : undefined);
+      if (paint) {
+        for (const a of areas) {
+          page.drawRectangle({ x: a.x1, y: a.y1, width: a.x2 - a.x1, height: a.y2 - a.y1, color: toRgb(paint) });
+        }
+      }
+      options.onRedaction?.(report);
       return doc;
     }
     case 'metadata': {
