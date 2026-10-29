@@ -41,10 +41,37 @@ class JsonCMapReaderFactory {
   }
 }
 
-export async function openPdf(bytes: Uint8Array): Promise<PDFDocumentProxy> {
+export interface OpenPdfOptions {
+  /** Password known for this document (e.g. entered when it was first opened). */
+  password?: string;
+  /**
+   * Asks the user for the password; `incorrect` is true when the last attempt was wrong.
+   * Resolve with null to cancel. Without it, a password-protected file fails to open.
+   */
+  askPassword?: (incorrect: boolean) => Promise<string | null>;
+}
+
+export interface OpenedPdf {
+  pdf: PDFDocumentProxy;
+  /** The password that opened the file, if one was needed. */
+  password?: string;
+  /** The file is encrypted (with or without an open password); pdf-lib cannot edit it. */
+  encrypted: boolean;
+}
+
+/** Thrown by openPdf when the user cancels the password prompt. */
+export class PasswordCancelledError extends Error {
+  constructor() {
+    super('암호 입력을 취소해 문서를 열지 않았습니다.');
+    this.name = 'PasswordCancelledError';
+  }
+}
+
+export async function openPdf(bytes: Uint8Array, options: OpenPdfOptions = {}): Promise<OpenedPdf> {
   // pdf.js transfers the buffer to its worker, so hand it a copy.
-  return pdfjs.getDocument({
+  const task = pdfjs.getDocument({
     data: bytes.slice(),
+    password: options.password,
     ...(JSON_ASSETS
       ? // Without standard font files pdf.js falls back to similar system fonts.
         { CMapReaderFactory: JsonCMapReaderFactory as never }
@@ -53,7 +80,39 @@ export async function openPdf(bytes: Uint8Array): Promise<PDFDocumentProxy> {
           cMapPacked: true,
           standardFontDataUrl: `${ASSET_BASE}standard_fonts/`,
         }),
-  }).promise;
+  });
+  let password = options.password;
+  let cancelled = false;
+  let failure: Error | undefined;
+  task.onPassword = (update: (password: string) => void, reason: number) => {
+    const incorrect = reason === pdfjs.PasswordResponses.INCORRECT_PASSWORD;
+    const stop = (error: Error) => {
+      failure = error;
+      void task.destroy();
+    };
+    if (!options.askPassword) {
+      return stop(new Error(incorrect ? 'PDF 암호가 맞지 않습니다.' : '암호로 보호된 PDF입니다. 암호가 필요합니다.'));
+    }
+    options.askPassword(incorrect).then(
+      (answer) => {
+        if (answer === null) {
+          cancelled = true;
+          return stop(new PasswordCancelledError());
+        }
+        password = answer;
+        update(answer);
+      },
+      (e: Error) => stop(e),
+    );
+  };
+  try {
+    const pdf = await task.promise;
+    const info = (await pdf.getMetadata()).info as { EncryptFilterName?: string | null };
+    return { pdf, password, encrypted: password !== undefined || !!info.EncryptFilterName };
+  } catch (e) {
+    if (cancelled) throw new PasswordCancelledError();
+    throw failure ?? e;
+  }
 }
 
 export class Viewer {

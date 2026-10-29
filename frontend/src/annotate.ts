@@ -39,7 +39,8 @@ export class Annotator {
       if (span && span.textContent?.trim()) this.startEditText(index, span);
     });
     overlay.addEventListener('pointerdown', (e) => {
-      if (e.button !== 0) return;
+      // Ignore extra fingers of a multi-touch gesture and non-primary mouse buttons.
+      if (e.button !== 0 || !e.isPrimary) return;
       switch (this.host.tool()) {
         case 'text':
           return this.startText(index, overlay, e);
@@ -212,20 +213,18 @@ export class Annotator {
       }
     };
     add(e);
-    overlay.setPointerCapture(e.pointerId);
-    const move = (ev: PointerEvent) => add(ev);
-    const up = async () => {
-      overlay.removeEventListener('pointermove', move);
-      overlay.removeEventListener('pointerup', up);
-      const img = await rasterStroke(stroke);
-      await this.host.commit(
-        [{ type: 'addImage', page: index, x: img.x, y: img.y, width: img.width, height: img.height, imageBase64: img.base64 }],
-        '펜',
-      );
-      preview.remove();
-    };
-    overlay.addEventListener('pointermove', move);
-    overlay.addEventListener('pointerup', up);
+    trackPointer(overlay, e, {
+      move: add,
+      up: async () => {
+        const img = await rasterStroke(stroke);
+        await this.host.commit(
+          [{ type: 'addImage', page: index, x: img.x, y: img.y, width: img.width, height: img.height, imageBase64: img.base64 }],
+          '펜',
+        );
+        preview.remove();
+      },
+      cancel: () => preview.remove(),
+    });
   }
 
   private startShape(index: number, overlay: HTMLDivElement, e: PointerEvent, kind: ShapeKind | 'redact'): void {
@@ -253,14 +252,11 @@ export class Annotator {
         height: `${Math.abs(end.y - start.y) * viewer.scale}px`,
       });
     };
-    overlay.setPointerCapture(e.pointerId);
     const move = (ev: PointerEvent) => {
       end = viewer.toPdfPoint(index, ev.clientX, ev.clientY);
       draw();
     };
     const up = async () => {
-      overlay.removeEventListener('pointermove', move);
-      overlay.removeEventListener('pointerup', up);
       const x = Math.min(start.x, end.x);
       const y = Math.min(start.y, end.y);
       const width = Math.abs(end.x - start.x);
@@ -292,8 +288,7 @@ export class Annotator {
       );
       box.remove();
     };
-    overlay.addEventListener('pointermove', move);
-    overlay.addEventListener('pointerup', up);
+    trackPointer(overlay, e, { move, up, cancel: () => box.remove() });
   }
 
   private async placeImage(index: number, e: PointerEvent): Promise<void> {
@@ -320,6 +315,67 @@ export class Annotator {
   }
 }
 
+/**
+ * Follows one pointer from pointerdown to pointerup on the overlay. A cancelled gesture (the browser
+ * took over a touch, or capture was lost) calls `cancel` instead of `up`, so nothing is committed.
+ */
+function trackPointer(
+  overlay: HTMLElement,
+  down: PointerEvent,
+  handlers: { move(ev: PointerEvent): void; up(ev: PointerEvent): unknown; cancel(): void },
+): void {
+  const id = down.pointerId;
+  const mine = (ev: PointerEvent) => ev.pointerId === id;
+  const detach = () => {
+    overlay.removeEventListener('pointermove', move);
+    overlay.removeEventListener('pointerup', up);
+    overlay.removeEventListener('pointercancel', cancel);
+    overlay.removeEventListener('lostpointercapture', cancel);
+  };
+  const move = (ev: PointerEvent) => {
+    if (mine(ev)) handlers.move(ev);
+  };
+  const up = (ev: PointerEvent) => {
+    if (!mine(ev)) return;
+    detach(); // before capture is released, so the following lostpointercapture is not a cancel
+    void handlers.up(ev);
+  };
+  const cancel = (ev: PointerEvent) => {
+    if (!mine(ev)) return;
+    detach();
+    handlers.cancel();
+  };
+  overlay.addEventListener('pointermove', move);
+  overlay.addEventListener('pointerup', up);
+  overlay.addEventListener('pointercancel', cancel);
+  try {
+    overlay.setPointerCapture(id);
+    overlay.addEventListener('lostpointercapture', cancel);
+  } catch {
+    // The pointer is already gone (e.g. cancelled before we got here).
+    detach();
+    handlers.cancel();
+  }
+}
+
+/**
+ * The browser's minimum font size in CSS px, measured the way pdf.js's TextLayer does. pdf.js
+ * multiplies every text-layer font-size by it (and scales the span back down with a transform),
+ * so it must be divided out to get the real font size; it is 1 unless the user set a minimum.
+ */
+let minFontSize: number | undefined;
+function browserMinFontSize(): number {
+  if (minFontSize === undefined) {
+    const div = document.createElement('div');
+    div.style.cssText = 'opacity:0;line-height:1;font-size:1px;position:absolute';
+    div.textContent = 'X';
+    document.body.append(div);
+    minFontSize = div.getBoundingClientRect().height || 1;
+    div.remove();
+  }
+  return minFontSize;
+}
+
 interface Segment {
   spans: HTMLElement[];
   /** Union of the spans, PDF points, visual top-left origin. */
@@ -341,7 +397,8 @@ function lineSegment(pageEl: HTMLElement, clicked: HTMLElement, scale: number): 
     .filter((el) => el.textContent && !/rotate/.test(el.style.transform))
     .map(toPt);
   const me = toPt(clicked);
-  const fontSize = parseFloat(getComputedStyle(clicked).fontSize) / scale || me.h;
+  // pdf.js: font-size = scale-factor × minFontSize × fontHeight (see browserMinFontSize).
+  const fontSize = parseFloat(getComputedStyle(clicked).fontSize) / scale / browserMinFontSize() || me.h;
   const midY = me.y + me.h / 2;
   const line = all
     .filter((o) => Math.abs(o.y + o.h / 2 - midY) < me.h * 0.35 && Math.abs(o.h - me.h) < me.h * 0.5)

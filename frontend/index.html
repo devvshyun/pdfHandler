@@ -15,7 +15,7 @@
         <div class="group">
           <button data-action="open" title="열기 (Ctrl+O)">열기</button>
           <button data-action="download" title="다운로드 (Ctrl+S)" data-needs-doc>다운로드</button>
-          <button data-action="save-server" title="서버에 저장" data-needs-doc data-needs-server>서버 저장</button>
+          <button data-action="save-server" title="서버에 저장" data-needs-doc data-edits data-needs-server>서버 저장</button>
         </div>
         <div class="group">
           <button data-action="undo" title="실행 취소 (Ctrl+Z)" data-needs-doc>↶</button>
@@ -43,21 +43,21 @@
           <button data-action="next" title="다음 쪽" data-needs-doc>›</button>
         </div>
         <div class="group">
-          <button data-action="rotate-left" title="왼쪽으로 회전" data-needs-doc>⟲</button>
-          <button data-action="rotate-right" title="오른쪽으로 회전" data-needs-doc>⟳</button>
-          <button data-action="delete" title="선택 쪽 삭제 (Delete)" data-needs-doc>쪽 삭제</button>
-          <button data-action="duplicate" title="쪽 복제" data-needs-doc>복제</button>
-          <button data-action="insert-blank" title="빈 쪽 삽입" data-needs-doc>빈 쪽</button>
+          <button data-action="rotate-left" title="왼쪽으로 회전" data-needs-doc data-edits>⟲</button>
+          <button data-action="rotate-right" title="오른쪽으로 회전" data-needs-doc data-edits>⟳</button>
+          <button data-action="delete" title="선택 쪽 삭제 (Delete)" data-needs-doc data-edits>쪽 삭제</button>
+          <button data-action="duplicate" title="쪽 복제" data-needs-doc data-edits>복제</button>
+          <button data-action="insert-blank" title="빈 쪽 삽입" data-needs-doc data-edits>빈 쪽</button>
         </div>
         <div class="group">
-          <button data-action="merge" title="다른 PDF를 뒤에 붙이기" data-needs-doc>병합</button>
-          <button data-action="split" title="여러 파일로 나누기" data-needs-doc>분할</button>
-          <button data-action="extract" title="선택 쪽만 새 PDF로" data-needs-doc>추출</button>
+          <button data-action="merge" title="다른 PDF를 뒤에 붙이기" data-needs-doc data-edits>병합</button>
+          <button data-action="split" title="여러 파일로 나누기" data-needs-doc data-edits>분할</button>
+          <button data-action="extract" title="선택 쪽만 새 PDF로" data-needs-doc data-edits>추출</button>
         </div>
         <div class="group">
-          <button data-action="watermark" title="워터마크" data-needs-doc>워터마크</button>
-          <button data-action="page-numbers" title="쪽 번호" data-needs-doc>쪽 번호</button>
-          <button data-action="metadata" title="문서 속성" data-needs-doc>속성</button>
+          <button data-action="watermark" title="워터마크" data-needs-doc data-edits>워터마크</button>
+          <button data-action="page-numbers" title="쪽 번호" data-needs-doc data-edits>쪽 번호</button>
+          <button data-action="metadata" title="문서 속성" data-needs-doc data-edits>속성</button>
         </div>
       </div>
     </header>
@@ -126,7 +126,10 @@
 
     <footer class="statusbar">
       <span id="status">준비</span>
-      <span id="dirty" hidden>저장되지 않은 변경</span>
+      <span class="status-right">
+        <span id="readonly" class="badge readonly" title="암호화된 PDF는 편집할 수 없습니다. 보기·검색·확대는 쓸 수 있습니다." hidden>암호화된 문서: 보기 전용</span>
+        <span id="dirty" hidden>저장되지 않은 변경</span>
+      </span>
     </footer>
 
     <input id="file-open" type="file" accept="application/pdf,.pdf" hidden />
