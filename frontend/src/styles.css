@@ -9,11 +9,13 @@
   --select: #1a73e8;
   --viewer-bg: #e5e7eb;
   --shadow: 0 1px 3px rgba(0, 0, 0, 0.18);
+  --ok-bg: #e6f4ea;
+  --ok-fg: #137333;
   color-scheme: light;
 }
 
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme='light']) {
     --bg: #1b1d21;
     --surface: #24272c;
     --border: #3a3f46;
@@ -24,12 +26,39 @@
     --select: #6ea8ff;
     --viewer-bg: #15171a;
     --shadow: 0 1px 4px rgba(0, 0, 0, 0.6);
+    --ok-bg: #1d3325;
+    --ok-fg: #81c995;
     color-scheme: dark;
   }
 }
 
+:root[data-theme='dark'] {
+  --bg: #1b1d21;
+  --surface: #24272c;
+  --border: #3a3f46;
+  --text: #e7e9ec;
+  --muted: #9aa1ab;
+  --accent: #ff6b5e;
+  --accent-soft: #3c2422;
+  --select: #6ea8ff;
+  --viewer-bg: #15171a;
+  --shadow: 0 1px 4px rgba(0, 0, 0, 0.6);
+  --ok-bg: #1d3325;
+  --ok-fg: #81c995;
+  color-scheme: dark;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+}
+
 * {
   box-sizing: border-box;
+}
+
+[hidden] {
+  display: none !important;
 }
 
 html,
@@ -94,7 +123,9 @@ button.link {
   display: flex;
   align-items: center;
   gap: 16px;
-  padding: 6px 12px;
+  padding-block: 6px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
   background: var(--surface);
   border-bottom: 1px solid var(--border);
 }
@@ -141,7 +172,9 @@ button.link {
   display: flex;
   align-items: center;
   gap: 4px;
-  padding: 5px 12px;
+  padding-block: 5px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
   background: var(--surface);
   border-bottom: 1px solid var(--border);
 }
@@ -472,8 +505,8 @@ body[data-tool='select'] .page .overlay {
 }
 
 .badge.online {
-  background: #e6f4ea;
-  color: #137333;
+  background: var(--ok-bg);
+  color: var(--ok-fg);
 }
 
 .badge.offline {
@@ -559,7 +592,9 @@ body[data-tool='select'] .page .overlay {
 .statusbar {
   display: flex;
   justify-content: space-between;
-  padding: 3px 12px;
+  padding-block: 3px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
   border-top: 1px solid var(--border);
   background: var(--surface);
   color: var(--muted);

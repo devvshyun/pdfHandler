@@ -26,13 +26,33 @@ interface PageSlot {
   task?: RenderTask;
 }
 
+/**
+ * Hosts that refuse binary .bcmap files (e.g. a claude.ai artifact) get the CMaps as base64 JSON instead;
+ * build with VITE_PDFJS_ASSETS=json and convert them with scripts/make-artifact.mjs.
+ */
+const JSON_ASSETS = import.meta.env.VITE_PDFJS_ASSETS === 'json';
+
+class JsonCMapReaderFactory {
+  async fetch({ name }: { name: string }) {
+    const res = await fetch(`${ASSET_BASE}cmaps/${name}.json`);
+    if (!res.ok) throw new Error(`CMap ${name}을(를) 불러오지 못했습니다.`);
+    const base64: string = await res.json();
+    return { cMapData: Uint8Array.from(atob(base64), (c) => c.charCodeAt(0)), isCompressed: true };
+  }
+}
+
 export async function openPdf(bytes: Uint8Array): Promise<PDFDocumentProxy> {
   // pdf.js transfers the buffer to its worker, so hand it a copy.
   return pdfjs.getDocument({
     data: bytes.slice(),
-    cMapUrl: `${ASSET_BASE}cmaps/`,
-    cMapPacked: true,
-    standardFontDataUrl: `${ASSET_BASE}standard_fonts/`,
+    ...(JSON_ASSETS
+      ? // Without standard font files pdf.js falls back to similar system fonts.
+        { CMapReaderFactory: JsonCMapReaderFactory as never }
+      : {
+          cMapUrl: `${ASSET_BASE}cmaps/`,
+          cMapPacked: true,
+          standardFontDataUrl: `${ASSET_BASE}standard_fonts/`,
+        }),
   }).promise;
 }
 

@@ -11,7 +11,8 @@ import type { PDFDocumentProxy } from 'pdfjs-dist';
 import { Annotator, readImageFile, type Tool } from './annotate';
 import { api, type ServerDocumentDetail } from './api';
 import { rasterRotatedText } from './raster';
-import { $, busy, downloadBytes, form, formatBytes, formatDate, setStatus, toast } from './ui';
+import { buildSamplePdf } from './sample';
+import { $, ask, busy, downloadBytes, form, formatBytes, formatDate, setStatus, toast } from './ui';
 import { extractText, openPdf, Thumbnails, Viewer, type Zoom } from './viewer';
 
 // ---------------------------------------------------------------------------
@@ -103,7 +104,7 @@ function onPageChange(index: number): void {
 
 async function openBytes(bytes: Uint8Array, fileName: string, server?: ServerDocumentDetail): Promise<void> {
   if (!isPdf(bytes)) throw new Error(`${fileName}은(는) PDF 파일이 아닙니다.`);
-  if (isDirty() && !confirm('저장하지 않은 변경 사항이 있습니다. 버리고 새 파일을 열까요?')) return;
+  if (isDirty() && !(await ask('새 파일 열기', '저장하지 않은 변경 사항이 있습니다. 버리고 새 파일을 열까요?'))) return;
   state.history = [bytes];
   state.index = 0;
   state.savedIndex = 0;
@@ -241,24 +242,30 @@ function updateSelection(): void {
 // Actions
 // ---------------------------------------------------------------------------
 
+const DEMO = import.meta.env.VITE_DEMO === '1';
+
 const actions: Record<string, () => unknown> = {
+  sample: () => busy('샘플 만드는 중', async () => openBytes(await buildSamplePdf(), '샘플.pdf')),
+
   open: async () => {
     const [file] = await pickFile('#file-open');
     if (file) await openFile(file);
   },
 
-  download: () => {
-    downloadBytes(current(), state.fileName);
-    state.savedIndex = state.index;
-    updateControls();
-  },
+  download: () =>
+    busy('다운로드', async () => {
+      if (!(await downloadBytes(current(), state.fileName))) return;
+      state.savedIndex = state.index;
+      updateControls();
+    }),
 
   'save-server': () =>
     busy('서버에 저장', async () => {
       let doc: ServerDocumentDetail;
       if (state.server) {
-        const note = prompt('버전 메모 (선택)', '') ?? undefined;
-        doc = await api.addVersion(state.server.id, current(), note || undefined);
+        const values = await form('서버에 새 버전 저장', [{ name: 'note', label: '버전 메모 (선택)', type: 'text' }]);
+        if (!values) return;
+        doc = await api.addVersion(state.server.id, current(), values.note || undefined);
         toast(`v${doc.currentVersion} 저장됨`);
       } else {
         doc = await api.upload(current(), state.fileName);
@@ -286,7 +293,7 @@ const actions: Record<string, () => unknown> = {
   delete: async () => {
     const pages = targetPages();
     if (pages.length >= viewer.pageCount) return toast('모든 쪽을 삭제할 수는 없습니다.', 'error');
-    if (pages.length > 1 && !confirm(`${rangeLabel(pages)}쪽 (${pages.length}개)을 삭제할까요?`)) return;
+    if (pages.length > 1 && !(await ask('쪽 삭제', `${rangeLabel(pages)}쪽 (${pages.length}개)을 삭제할까요?`))) return;
     state.selection.clear();
     await commit([{ type: 'delete', pages }], `${rangeLabel(pages)}쪽 삭제`, Math.min(pages[0], viewer.pageCount - pages.length - 1));
   },
@@ -320,7 +327,7 @@ const actions: Record<string, () => unknown> = {
     await busy('추출', async () => {
       const pages = parsePageRanges(values.range, viewer.pageCount);
       const out = await applyOperations(current(), [{ type: 'extract', pages }]);
-      downloadBytes(out, `${baseName()}_p${values.range.replace(/\s+/g, '')}.pdf`);
+      await downloadBytes(out, `${baseName()}_p${values.range.replace(/\s+/g, '')}.pdf`);
     });
   },
 
@@ -349,10 +356,14 @@ const actions: Record<string, () => unknown> = {
               .filter(Boolean)
               .map((r) => parsePageRanges(r, viewer.pageCount));
       if (!groups.length) throw new Error('나눌 범위를 입력하세요.');
-      if (groups.length > 50 && !confirm(`${groups.length}개 파일이 만들어집니다. 계속할까요?`)) return;
+      if (groups.length > 50 && !(await ask('분할', `${groups.length}개 파일이 만들어집니다. 계속할까요?`))) return;
       const parts = await splitPdf(current(), groups);
-      parts.forEach((bytes, i) => setTimeout(() => downloadBytes(bytes, `${baseName()}_${i + 1}.pdf`), i * 250));
-      toast(`${parts.length}개 파일로 분할`);
+      // One at a time: a host save prompt may need confirming for each file.
+      let saved = 0;
+      for (const [i, bytes] of parts.entries()) {
+        if (await downloadBytes(bytes, `${baseName()}_${i + 1}.pdf`)) saved++;
+      }
+      toast(`${parts.length}개 파일로 분할, ${saved}개 저장`);
     });
   },
 
@@ -595,7 +606,7 @@ async function refreshLibrary(): Promise<void> {
         const del = document.createElement('button');
         del.textContent = '삭제';
         del.onclick = async () => {
-          if (!confirm(`"${doc.title}"과(와) 모든 버전을 서버에서 삭제할까요?`)) return;
+          if (!(await ask('서버 문서 삭제', `"${doc.title}"과(와) 모든 버전을 서버에서 삭제할까요?`))) return;
           await busy('삭제', async () => {
             await api.remove(doc.id);
             if (state.server?.id === doc.id) {
@@ -663,7 +674,7 @@ function renderVersions(): void {
         revert.textContent = '복원';
         revert.title = '이 버전을 새 최신 버전으로 복사';
         revert.onclick = async () => {
-          if (!confirm(`v${v.version}을(를) 최신 버전으로 복원할까요? (기록은 보존됩니다)`)) return;
+          if (!(await ask('버전 복원', `v${v.version}을(를) 최신 버전으로 복원할까요? (기록은 보존됩니다)`))) return;
           await busy('복원', async () => {
             await api.revert(doc.id, v.version);
             await openServerDoc(doc.id);
@@ -689,7 +700,7 @@ function updateControls(): void {
   $<HTMLButtonElement>('[data-action="redo"]').disabled = state.index >= state.history.length - 1;
   $('#page-total').textContent = `/ ${viewer.pageCount}`;
   $('#dirty').hidden = !isDirty();
-  document.title = hasDoc() ? `${isDirty() ? '* ' : ''}${state.fileName} - pdfHandler` : 'pdfHandler - 웹 PDF 뷰어/편집기';
+  document.title = hasDoc() ? `${isDirty() ? '* ' : ''}${state.fileName} - pdfHandler` : 'pdfHandler';
 }
 
 document.addEventListener('click', (e) => {
@@ -785,4 +796,15 @@ window.addEventListener('beforeunload', (e) => {
 
 setTool('select');
 updateControls();
-void checkServer();
+if (DEMO) {
+  // Static build (e.g. a hosted demo): no backend, so show what the server features need and open a sample.
+  const badge = $('#server-status');
+  badge.textContent = '데모';
+  badge.className = 'badge offline';
+  $('#library').innerHTML =
+    '<p class="muted">이 데모는 브라우저 안에서만 동작합니다. 문서함과 버전 기록은 NestJS 백엔드를 함께 띄우면 켜집니다.</p>';
+  $('[data-action="save-server"]').hidden = true;
+  void actions.sample();
+} else {
+  void checkServer();
+}

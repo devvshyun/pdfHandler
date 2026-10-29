@@ -10,7 +10,8 @@
     "prebuild": "npm run copy-pdfjs-assets",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "build:artifact": "VITE_DEMO=1 VITE_PDFJS_ASSETS=json npm run build && node scripts/make-artifact.mjs"
   },
   "dependencies": {
     "@pdfhandler/core": "0.1.0",

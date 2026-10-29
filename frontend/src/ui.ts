@@ -97,8 +97,38 @@ export function form(title: string, fields: Field[], hint?: string): Promise<Rec
   });
 }
 
-export function downloadBytes(bytes: Uint8Array, filename: string): void {
-  const url = URL.createObjectURL(new Blob([bytes as Uint8Array<ArrayBuffer>], { type: 'application/pdf' }));
+/** Yes/no confirmation inside the page (native confirm() is unavailable in sandboxed hosts). */
+export async function ask(title: string, message: string): Promise<boolean> {
+  return (await form(title, [], message)) !== null;
+}
+
+interface DownloadsCapability {
+  save(req: { filename: string; data: Blob }): Promise<{ status: 'saved' | 'delivered' }>;
+}
+type ClaudeHost = { use(name: 'downloads'): Promise<DownloadsCapability | null> };
+
+let downloadsCap: Promise<DownloadsCapability | null> | undefined;
+function hostDownloads(): Promise<DownloadsCapability | null> {
+  // Inside a claude.ai artifact, plain <a download> links are inert; the host offers a save prompt instead.
+  const host = (window as unknown as { claude?: ClaudeHost }).claude;
+  downloadsCap ??= host?.use ? host.use('downloads').catch(() => null) : Promise.resolve(null);
+  return downloadsCap;
+}
+
+export async function downloadBytes(bytes: Uint8Array, filename: string): Promise<boolean> {
+  const blob = new Blob([bytes as Uint8Array<ArrayBuffer>], { type: 'application/pdf' });
+  const downloads = await hostDownloads();
+  if (downloads) {
+    try {
+      await downloads.save({ filename, data: blob });
+      return true;
+    } catch (e) {
+      const code = (e as { code?: string }).code;
+      if (code === 'declined') return false;
+      throw new Error(code === 'rate_limited' ? '이미 저장 확인 창이 열려 있습니다. 먼저 처리하세요.' : `저장 실패: ${(e as Error).message ?? code}`);
+    }
+  }
+  const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
   a.download = filename;
@@ -106,6 +136,7 @@ export function downloadBytes(bytes: Uint8Array, filename: string): void {
   a.click();
   a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 10_000);
+  return true;
 }
 
 export function formatBytes(n: number): string {

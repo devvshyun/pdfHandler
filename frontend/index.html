@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>pdfHandler - 웹 PDF 뷰어/편집기</title>
+    <title>pdfHandler</title>
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%23d93025'/><text x='16' y='21' font-size='11' font-family='Arial' font-weight='700' text-anchor='middle' fill='white'>PDF</text></svg>" />
     <link rel="stylesheet" href="/src/styles.css" />
   </head>
@@ -90,7 +90,10 @@
         <div class="dropzone" id="dropzone">
           <div class="dropzone-inner">
             <h1>PDF 파일을 여기로 끌어다 놓으세요</h1>
-            <p>또는 <button data-action="open" class="link">파일 선택</button></p>
+            <p>
+              또는 <button data-action="open" class="link">파일 선택</button> ·
+              <button data-action="sample" class="link">샘플 문서 열기</button>
+            </p>
             <p class="muted">
               파일은 브라우저 안에서 처리됩니다(pdf.js + pdf-lib). 서버 저장을 누를 때만 업로드됩니다.
             </p>
