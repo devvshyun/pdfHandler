@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_DATABASE: pdfhandler_test
+          MYSQL_USER: pdfhandler
+          MYSQL_PASSWORD: pdfhandler
+          MYSQL_ROOT_PASSWORD: root
+        ports: ['3306:3306']
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -updfhandler -ppdfhandler"
+          --health-interval 5s --health-timeout 5s --health-retries 30
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 30
+
+    env:
+      # The backend e2e suite wipes and migrates this database.
+      E2E_DB_HOST: 127.0.0.1
+      E2E_DB_PORT: '3306'
+      E2E_DB_USER: pdfhandler
+      E2E_DB_PASSWORD: pdfhandler
+      E2E_DB_NAME: pdfhandler_test
+      E2E_REDIS_URL: redis://127.0.0.1:6379/0
+      # Fail the job instead of silently skipping the e2e suite.
+      E2E_REQUIRED: '1'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Build (core, frontend, backend)
+        run: npm run build
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test (core unit, backend unit + API e2e)
+        run: npm test

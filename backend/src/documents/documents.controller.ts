@@ -13,11 +13,13 @@ import {
   Res,
   StreamableFile,
   UploadedFile,
-  UseInterceptors,
+  UseGuards,
 } from '@nestjs/common';
-import { FileInterceptor } from '@nestjs/platform-express';
 import { Response } from 'express';
-import { assertPdfUpload, contentDisposition, decodeFilename } from '../common/upload';
+import { AuthGuard, DocumentScope, Scope } from '../auth/auth.guard';
+import { validateOperations } from '../common/operation-validation';
+import { contentDisposition, decodeFilename, PdfUpload, requireFile } from '../common/upload';
+import { RateLimit, RateLimitGuard } from '../rate-limit/rate-limit.guard';
 import { DocumentsService } from './documents.service';
 import {
   ApplyOperationsBody,
@@ -27,76 +29,104 @@ import {
   UploadVersionBody,
 } from './dto/documents.dto';
 
+/**
+ * Every route is scoped to the caller's own documents (AuthGuard → @Scope()). Documents of other
+ * users answer 404 exactly like ids that do not exist.
+ */
 @Controller('documents')
+@UseGuards(AuthGuard, RateLimitGuard)
+@RateLimit('documents')
 export class DocumentsController {
   constructor(private readonly documents: DocumentsService) {}
 
   @Post()
-  @UseInterceptors(FileInterceptor('file'))
-  upload(@UploadedFile() file: Express.Multer.File | undefined, @Body() body: UploadDocumentBody) {
-    assertPdfUpload(file);
-    return this.documents.create(new Uint8Array(file.buffer), decodeFilename(file.originalname), body.title);
+  @PdfUpload('file')
+  upload(@Scope() scope: DocumentScope, @UploadedFile() file: Express.Multer.File | undefined, @Body() body: UploadDocumentBody) {
+    requireFile(file);
+    return this.documents.create(scope, file, decodeFilename(file.originalname), body.title);
   }
 
   @Get()
-  list(@Query() query: ListDocumentsQuery) {
-    return this.documents.list(query);
+  list(@Scope() scope: DocumentScope, @Query() query: ListDocumentsQuery) {
+    return this.documents.list(scope, query);
   }
 
   @Get(':id')
-  get(@Param('id', ParseUUIDPipe) id: string) {
-    return this.documents.get(id);
+  get(@Scope() scope: DocumentScope, @Param('id', ParseUUIDPipe) id: string) {
+    return this.documents.get(scope, id);
   }
 
   @Patch(':id')
-  rename(@Param('id', ParseUUIDPipe) id: string, @Body() body: UpdateDocumentBody) {
-    return this.documents.rename(id, body.title);
+  rename(@Scope() scope: DocumentScope, @Param('id', ParseUUIDPipe) id: string, @Body() body: UpdateDocumentBody) {
+    return this.documents.rename(scope, id, body.title);
   }
 
   @Delete(':id')
   @HttpCode(204)
-  remove(@Param('id', ParseUUIDPipe) id: string) {
-    return this.documents.remove(id);
+  remove(@Scope() scope: DocumentScope, @Param('id', ParseUUIDPipe) id: string) {
+    return this.documents.remove(scope, id);
   }
 
   /** Downloads the current version, or `?version=N`. Add `?download=1` to force a save dialog. */
   @Get(':id/file')
   async file(
+    @Scope() scope: DocumentScope,
     @Param('id', ParseUUIDPipe) id: string,
     @Query('version', new ParseIntPipe({ optional: true })) version: number | undefined,
     @Query('download') download: string | undefined,
     @Res({ passthrough: true }) res: Response,
   ) {
-    const { stream, size, filename } = await this.documents.openFile(id, version);
+    const { stream, size, filename } = await this.documents.openFile(scope, id, version);
     res.set({
       'Content-Type': 'application/pdf',
       'Content-Length': String(size),
       'Content-Disposition': contentDisposition(filename, !download),
-      'Cache-Control': version ? 'private, max-age=31536000, immutable' : 'no-cache',
+      // Private: the response depends on the Authorization header. Old versions can be deleted,
+      // so they are no longer marked immutable.
+      'Cache-Control': 'private, no-cache',
+      Vary: 'Authorization',
     });
     return new StreamableFile(stream);
   }
 
   /** Saves a PDF edited in the browser as the next version. */
   @Post(':id/versions')
-  @UseInterceptors(FileInterceptor('file'))
+  @PdfUpload('file')
   addVersion(
+    @Scope() scope: DocumentScope,
     @Param('id', ParseUUIDPipe) id: string,
     @UploadedFile() file: Express.Multer.File | undefined,
     @Body() body: UploadVersionBody,
   ) {
-    assertPdfUpload(file);
-    return this.documents.addClientVersion(id, new Uint8Array(file.buffer), body.note);
+    requireFile(file);
+    return this.documents.addClientVersion(scope, id, file, body.note);
   }
 
-  /** Runs pdf operations server-side against the current version. */
+  /** Deletes every version except the current one (their files are removed from storage). */
+  @Post(':id/versions/purge')
+  @HttpCode(200)
+  purgeVersions(@Scope() scope: DocumentScope, @Param('id', ParseUUIDPipe) id: string) {
+    return this.documents.purgeVersions(scope, id);
+  }
+
+  /** Deletes one old version; the current version cannot be deleted. Numbers are not reused. */
+  @Delete(':id/versions/:version')
+  deleteVersion(
+    @Scope() scope: DocumentScope,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('version', ParseIntPipe) version: number,
+  ) {
+    return this.documents.deleteVersion(scope, id, version);
+  }
+
+  /** Runs pdf operations server-side (in a worker thread) against the current version. */
   @Post(':id/operations')
-  applyOperations(@Param('id', ParseUUIDPipe) id: string, @Body() body: ApplyOperationsBody) {
-    return this.documents.applyOperations(id, body.operations, body.note);
+  applyOperations(@Scope() scope: DocumentScope, @Param('id', ParseUUIDPipe) id: string, @Body() body: ApplyOperationsBody) {
+    return this.documents.applyOperations(scope, id, validateOperations(body.operations), body.note);
   }
 
   @Post(':id/versions/:version/revert')
-  revert(@Param('id', ParseUUIDPipe) id: string, @Param('version', ParseIntPipe) version: number) {
-    return this.documents.revert(id, version);
+  revert(@Scope() scope: DocumentScope, @Param('id', ParseUUIDPipe) id: string, @Param('version', ParseIntPipe) version: number) {
+    return this.documents.revert(scope, id, version);
   }
 }

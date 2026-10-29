@@ -33,8 +33,50 @@ export interface PageResult<T> {
   limit: number;
 }
 
+// ---- access token (see auth.ts) ---------------------------------------------
+// localStorage can throw (sandboxed iframes, blocked storage), so every access is guarded and the
+// token is also kept in memory for the current page.
+const TOKEN_KEY = 'pdfhandler.token';
+let memoryToken: string | null | undefined;
+
+export const AUTH_CHANGED = 'pdfhandler:auth-changed';
+
+export function getToken(): string | null {
+  if (memoryToken === undefined) {
+    try {
+      memoryToken = localStorage.getItem(TOKEN_KEY);
+    } catch {
+      memoryToken = null;
+    }
+  }
+  return memoryToken;
+}
+
+export function setToken(token: string | null): void {
+  memoryToken = token;
+  try {
+    if (token) localStorage.setItem(TOKEN_KEY, token);
+    else localStorage.removeItem(TOKEN_KEY);
+  } catch {
+    /* storage unavailable: the in-memory token still works until reload */
+  }
+  window.dispatchEvent(new Event(AUTH_CHANGED));
+}
+
+function authFetch(url: string, init: RequestInit = {}): Promise<Response> {
+  const token = getToken();
+  if (!token) return fetch(url, init);
+  const headers = new Headers(init.headers);
+  headers.set('Authorization', `Bearer ${token}`);
+  return fetch(url, { ...init, headers }).then((res) => {
+    // Expired or revoked token: forget it so the UI offers the login button again.
+    if (res.status === 401) setToken(null);
+    return res;
+  });
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, init);
+  const res = await authFetch(`${BASE}${path}`, init);
   if (!res.ok) {
     let message = `${res.status} ${res.statusText}`;
     try {
@@ -56,7 +98,48 @@ function pdfForm(bytes: Uint8Array, filename: string, extra: Record<string, stri
   return form;
 }
 
+export interface AuthUser {
+  id: string;
+  email: string;
+}
+
+export interface AuthSession {
+  token: string;
+  expiresAt: string;
+  user: AuthUser;
+}
+
+const json = (body: unknown): RequestInit => ({
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify(body),
+});
+
 export const api = {
+  /** `authRequired: false` also for older servers without /auth (everything stays usable). */
+  async me(): Promise<{ authRequired: boolean; user: AuthUser | null }> {
+    const res = await authFetch(`${BASE}/auth/me`);
+    if (res.status === 404) return { authRequired: false, user: null };
+    if (!res.ok) throw new Error(`로그인 상태 확인 실패: ${res.status}`);
+    return res.json();
+  },
+
+  login(email: string, password: string): Promise<AuthSession> {
+    return request('/auth/login', json({ email, password }));
+  },
+
+  register(email: string, password: string): Promise<AuthSession> {
+    return request('/auth/register', json({ email, password }));
+  },
+
+  deleteVersion(id: string, version: number): Promise<ServerDocumentDetail> {
+    return request(`/documents/${id}/versions/${version}`, { method: 'DELETE' });
+  },
+
+  purgeVersions(id: string): Promise<ServerDocumentDetail & { deleted: number }> {
+    return request(`/documents/${id}/versions/purge`, { method: 'POST' });
+  },
+
   async health(): Promise<boolean> {
     try {
       const res = await fetch(`${BASE}/health`, { signal: AbortSignal.timeout(3000) });
@@ -98,7 +181,7 @@ export const api = {
   },
 
   async download(id: string, version?: number): Promise<Uint8Array> {
-    const res = await fetch(`${BASE}/documents/${id}/file${version ? `?version=${version}` : ''}`);
+    const res = await authFetch(`${BASE}/documents/${id}/file${version ? `?version=${version}` : ''}`);
     if (!res.ok) throw new Error(`다운로드 실패: ${res.status}`);
     return new Uint8Array(await res.arrayBuffer());
   },

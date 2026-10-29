@@ -52,16 +52,21 @@ frontend        Vite 앱: viewer(pdf.js) · annotate · raster · api · main
 
 | 테이블 | 주요 컬럼 |
 | --- | --- |
-| `documents` | `id`(uuid), `title`, `original_name`, `current_version`, `page_count`, `size` |
+| `users` | `id`(uuid), `email`(unique, 소문자), `password_hash`(scrypt, 사용자별 salt) |
+| `documents` | `id`(uuid), `owner_id`(→ users, NULL 허용), `title`, `original_name`, `current_version`, `page_count`, `size` |
 | `document_versions` | `document_id`, `version`(문서별 unique), `source`(upload / client_edit / server_operations), `storage_key`, `sha256`, `note`, `operations`(json) |
 
 ### Redis 사용처
 
 | 키 | 용도 |
 | --- | --- |
-| `doc:<id>` | 문서 상세 캐시 (TTL `CACHE_TTL_SECONDS`) |
-| `docs:list:<gen>:…` + `gen:documents` | 목록 캐시. 변경 시 세대 번호를 올려 일괄 무효화 |
+| `doc:<scope>:<id>` | 문서 상세 캐시 (TTL `CACHE_TTL_SECONDS`). `<scope>`는 `u:<userId>` 또는 `all`(단일 사용자 모드)이라 다른 사용자에게 캐시가 새지 않음 |
+| `docs:list:<scope>:<gen>:…` + `gen:documents:<scope>` | 사용자별 목록 캐시. 변경 시 소유자·`all` 세대 번호를 올려 일괄 무효화 |
 | `lock:doc:<id>` | 버전 번호 채번용 분산 락 (`SET NX PX` + Lua 해제). 여러 인스턴스가 동시에 저장해도 번호가 겹치지 않음 |
+| `rl:<bucket>:<u:id 또는 ip:addr>` | 요청 수 제한 고정 윈도 카운터 (`INCR` + `EXPIRE`, Lua). 모든 인스턴스가 공유 |
+| `rl:login-fail:<email 해시>` | 계정별 로그인 실패 횟수 (IP를 바꿔 가며 대입하는 공격 차단) |
+
+`REDIS_KEY_PREFIX`를 주면 모든 키 앞에 붙습니다(같은 Redis를 여러 환경이 공유할 때).
 
 Redis가 내려가도 캐시는 우회되고 락은 DB unique 제약이 최후 방어선이 되도록 설계했습니다.
 
@@ -70,9 +75,11 @@ Redis가 내려가도 캐시는 우회되고 락은 DB unique 제약이 최후 �
 ### Docker Compose (권장)
 
 ```bash
-docker compose up --build
-# http://localhost:3000
+JWT_SECRET=$(openssl rand -hex 32) docker compose up --build
+# http://localhost:3000  → 서버 문서함의 "회원가입"으로 계정을 만든 뒤 사용
 ```
+
+컨테이너는 `NODE_ENV=production`이라 `JWT_SECRET`이 없으면 기동하지 않습니다.
 
 ### 로컬 개발
 
@@ -92,16 +99,48 @@ npm run dev:frontend                       # http://localhost:5173 (/api 는 300
 ### 테스트
 
 ```bash
-npm test          # core 59개(삭제·이미지·sanitize·텍스트 교체 43개 포함) + backend 3개
+npm test          # core 단위 테스트 + backend 단위 테스트 + backend API e2e(DB 설정 시)
 ```
+
+backend API e2e(`backend/test/e2e`)는 빌드된 서버(`dist/main.js`, 오래됐으면 자동 재빌드)를 실제 MySQL·Redis에 띄워 인증, 소유권 격리(캐시 포함), 버전 삭제, 업로드 제한, 요청 수 제한, 워커 풀을 검사합니다. 접속 정보는 `E2E_DB_HOST/PORT/USER/PASSWORD/NAME`(기본 DB `pdfhandler_test` — **테스트가 테이블을 지웁니다**), `E2E_REDIS_URL`. DB나 Redis에 닿지 않으면 이유를 출력하고 건너뜁니다(`E2E_REQUIRED=1`이면 실패). CI(`.github/workflows/ci.yml`)는 MySQL 8.4·Redis 7 서비스로 전부 실행합니다.
 
 ## REST API
 
 모든 경로는 `/api` 접두사를 가집니다. 쪽 인덱스는 **0부터** 셉니다.
 
+### 인증
+
+* `POST /auth/register`, `POST /auth/login` — `{ "email", "password" }`(8자 이상) → `{ token, expiresAt, user }`. 토큰은 HS256 JWT(`JWT_SECRET`, 기본 12시간)입니다.
+* `GET /auth/me` — 항상 200: `{ authRequired, user }` (토큰이 없거나 만료되면 `user: null`).
+* `/documents/**`는 `Authorization: Bearer <token>`이 필요하고(없으면 401), **자기 문서만** 보입니다. 다른 사용자의 문서 id는 존재하지 않는 id와 똑같이 404를 돌려줘 id를 떠볼 수 없습니다.
+* `AUTH_REQUIRED=false`: 로그인 없는 **단일 사용자 모드**(로컬 설치용). 모든 문서가 모두에게 보이고 새 문서는 소유자가 없습니다.
+* 계정 도입 전에 올린 문서(`owner_id` NULL)는 `AUTH_REQUIRED=true`에서 **아무에게도 보이지 않습니다**. 넘기려면 `UPDATE documents SET owner_id = '<user id>' WHERE owner_id IS NULL;`.
+* `/tools/**`는 로그인 없이 쓸 수 있고 IP별로 제한되며, `/health`는 공개입니다.
+
+### 남용 방지
+
+| 대상 | 기본 제한 | 변수 |
+| --- | --- | --- |
+| `/auth/register`, `/auth/login` | IP당 20회/60초 | `RATE_LIMIT_AUTH` |
+| 로그인 실패 | 이메일당 10회/15분 (넘으면 맞는 비밀번호도 429) | `RATE_LIMIT_LOGIN` |
+| `/tools/*` | IP당 30회/60초 | `RATE_LIMIT_TOOLS` |
+| `/documents/*` | 사용자당 300회/60초 | `RATE_LIMIT_DOCUMENTS` |
+
+초과하면 429와 `Retry-After`. 값은 `횟수/초`(예: `30/60`), `0`이면 끕니다. 리버스 프록시 뒤에서는 `TRUST_PROXY`를 설정해야 실제 클라이언트 IP로 셉니다.
+
+업로드는 메모리가 아니라 `UPLOAD_TMP_DIR`에 디스크로 받고 요청이 끝나면(오류여도) 지웁니다. 파일 하나 `MAX_UPLOAD_MB`, 요청당 파일 `MAX_MERGE_FILES`개, 요청 전체 `MAX_REQUEST_MB`(Content-Length로 본문을 읽기 전에 먼저 거르고, 받은 뒤 합계도 확인)를 넘으면 413입니다.
+
+PDF 처리(`getPdfInfo`/`applyOperations`/`mergePdfs`)는 `worker_threads` 풀(`PDF_WORKERS`개)에서 실행되어 요청 스레드를 막지 않습니다. 대기열(`PDF_QUEUE_MAX`)이 차면 즉시 503("서버가 … 바쁩니다"), `PDF_TASK_TIMEOUT_MS`를 넘긴 작업은 워커를 종료하고 503을 돌려줍니다. 작업 내용이 잘못되면(필드 타입, base64·PNG/JPEG가 아닌 이미지, 범위 밖 쪽 번호 등) `operations[i].field: …` 형태의 400입니다.
+
+CORS 헤더는 기본적으로 보내지 않습니다(같은 출처만). 내장 프론트엔드는 같은 출처이고 `npm run dev:frontend`는 `/api`를 프록시하므로 개발 중에도 필요 없습니다. 다른 출처에서 API를 쓰려면 `CORS_ORIGINS=https://a.example,https://b.example`(모두 허용은 `*`).
+
+### 엔드포인트
+
 | 메서드 | 경로 | 설명 |
 | --- | --- | --- |
-| GET | `/health` | DB·Redis 상태 |
+| GET | `/health` | DB·Redis·워커 풀 상태 |
+| POST | `/auth/register` · `/auth/login` | 가입·로그인 → 토큰 |
+| GET | `/auth/me` | 현재 사용자 |
 | POST | `/documents` | 업로드 (multipart `file`, 선택 `title`) |
 | GET | `/documents?page=&limit=&q=` | 목록 (제목 검색) |
 | GET | `/documents/:id` | 상세 + 버전 목록 |
@@ -111,6 +150,8 @@ npm test          # core 59개(삭제·이미지·sanitize·텍스트 교체 43�
 | POST | `/documents/:id/versions` | 브라우저에서 편집한 PDF를 새 버전으로 저장 (multipart `file`, `note`) |
 | POST | `/documents/:id/operations` | 서버에서 작업 적용 후 새 버전 생성 |
 | POST | `/documents/:id/versions/:v/revert` | 과거 버전을 새 최신 버전으로 복사 |
+| DELETE | `/documents/:id/versions/:v` | 이전 버전 하나와 저장된 파일을 영구 삭제 (현재 버전은 400, 번호는 재사용하지 않음) → 문서 상세 |
+| POST | `/documents/:id/versions/purge` | 현재 버전만 남기고 모두 삭제 → 문서 상세 + `deleted` |
 | POST | `/tools/info` | PDF 정보 (저장 안 함) |
 | POST | `/tools/merge` | multipart `files` 2개 이상 병합 → PDF |
 | POST | `/tools/apply` | multipart `file` + `operations`(JSON 문자열) → PDF |
@@ -119,6 +160,7 @@ npm test          # core 59개(삭제·이미지·sanitize·텍스트 교체 43�
 
 ```bash
 curl -X POST localhost:3000/api/documents/<id>/operations \
+  -H "authorization: Bearer $TOKEN" \
   -H 'content-type: application/json' \
   -d '{
     "note": "배포용 정리",
@@ -141,9 +183,22 @@ curl -X POST localhost:3000/api/documents/<id>/operations \
 | `DB_HOST` / `DB_PORT` / `DB_USER` / `DB_PASSWORD` / `DB_NAME` | 127.0.0.1 / 3306 / pdfhandler / pdfhandler / pdfhandler | MySQL |
 | `DB_MIGRATE_ON_BOOT` | true | 기동 시 미적용 마이그레이션 실행 |
 | `REDIS_URL` | redis://127.0.0.1:6379 | |
+| `REDIS_KEY_PREFIX` | (없음) | 모든 Redis 키 접두사 |
 | `CACHE_TTL_SECONDS` | 300 | |
 | `STORAGE_DIR` | ./storage | PDF 저장 경로 |
-| `MAX_UPLOAD_MB` | 100 | 업로드 최대 크기 |
+| `MAX_UPLOAD_MB` | 100 | 파일 하나의 최대 크기 |
+| `MAX_MERGE_FILES` | 20 | 요청 하나의 최대 파일 수 |
+| `MAX_REQUEST_MB` | `MAX_UPLOAD_MB`×2 | 요청 전체(모든 파일 합계) 최대 크기 |
+| `UPLOAD_TMP_DIR` | `<os tmp>/pdfhandler-uploads` | 업로드 임시 저장 경로 (요청 후 삭제) |
+| `AUTH_REQUIRED` | true | false면 로그인 없는 단일 사용자 모드 |
+| `JWT_SECRET` | (개발용 기본값 + 경고) | 토큰 서명 키. `NODE_ENV=production`에서는 **필수** (`openssl rand -hex 32`) |
+| `JWT_TTL_SECONDS` | 43200 | 토큰 유효 시간 (12시간) |
+| `CORS_ORIGINS` | (없음 = CORS 없음) | 허용 출처, 쉼표 구분. `*`는 전체 |
+| `TRUST_PROXY` | false | Express `trust proxy` (예: `1`, `loopback`) |
+| `RATE_LIMIT_AUTH` / `RATE_LIMIT_LOGIN` / `RATE_LIMIT_TOOLS` / `RATE_LIMIT_DOCUMENTS` | 20/60 · 10/900 · 30/60 · 300/60 | `횟수/초`, 0이면 끔 |
+| `PDF_WORKERS` | CPU-1 (1~4) | PDF 워커 스레드 수. 0이면 요청 스레드에서 처리 |
+| `PDF_QUEUE_MAX` | 16 | 대기 가능한 작업 수 (넘으면 503) |
+| `PDF_TASK_TIMEOUT_MS` | 120000 | 작업 하나의 최대 시간 (넘으면 503) |
 | `PDF_FONT_PATH` | (없음) | 서버 측 텍스트 작업용 TTF/OTF |
 | `FRONTEND_DIST` | ../frontend/dist | 정적 서빙할 프론트엔드 빌드 경로 |
 
@@ -156,8 +211,9 @@ curl -X POST localhost:3000/api/documents/<id>/operations \
   * 색상 키 마스크(`/Mask` 배열)는 그대로 두고, 처리할 수 없는 SMask는 제거합니다(그 이미지는 불투명하게 보임).
   * 글자를 도형(패스)으로 그린 PDF, 구조 트리의 `/T`(제목) 등 대체 텍스트 외 속성
   * 문서 속성·XMP·책갈피·첨부파일·스크립트: `sanitize` 작업으로 따로 지웁니다.
-  * 서버 문서함의 **이전 버전**: 원본이 그대로 보관되므로 민감 정보라면 문서를 새로 올리고 원본 문서를 삭제하세요.
+  * 서버 문서함의 **이전 버전**: 원본이 그대로 보관되므로, 가린 뒤에는 버전 기록의 "이전 버전 모두 삭제"(또는 `POST /documents/:id/versions/purge`)로 옛 버전을 지우세요.
 * 텍스트 수정은 **원본 글꼴에 필요한 글자가 모두 있으면 그 글꼴을 그대로** 씁니다(문서에 이미 쓰인 숫자·이름 수정 등). 없는 글자가 있으면 영문은 비슷한 표준 글꼴(Times/Helvetica, 굵기 반영), 한글은 이미지로 넣습니다.
 * 한 줄 안에서 굵기·색이 섞인 구간을 고치면 한 가지 스타일로 합쳐집니다. 줄바꿈은 다시 하지 않으므로, 줄 공간을 넘치면 글자 폭을 최대 60%까지 줄이고 그래도 넘치면 경고합니다.
 * 파일 저장소는 로컬 디스크입니다. `StorageService`만 교체하면 S3 등으로 옮길 수 있습니다.
-* 인증/권한이 없습니다. 외부에 공개하려면 인증 계층을 먼저 추가하세요.
+* 인증은 이메일·비밀번호와 만료형 토큰뿐입니다(갱신 토큰·로그아웃 시 토큰 폐기·비밀번호 재설정·문서 공유 없음). 로그아웃은 브라우저에서 토큰을 지우는 것이며 토큰 자체는 만료까지 유효합니다.
+* 요청 수 제한은 고정 윈도 방식이라 윈도 경계에서 순간적으로 최대 2배까지 통과할 수 있고, Redis가 내려가면 제한 없이 통과시킵니다(가용성 우선).

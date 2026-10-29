@@ -1,7 +1,7 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { createReadStream, ReadStream } from 'node:fs';
-import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve, sep } from 'node:path';
 import { AppConfig } from '../config/configuration';
 
@@ -18,6 +18,22 @@ export class StorageService {
     const path = this.pathFor(key);
     await mkdir(dirname(path), { recursive: true });
     await writeFile(path, data);
+  }
+
+  /** Copies a local file (e.g. a multer temp upload) into storage. */
+  async putFile(key: string, sourcePath: string): Promise<void> {
+    const path = this.pathFor(key);
+    await mkdir(dirname(path), { recursive: true });
+    await copyFile(sourcePath, path);
+  }
+
+  /** Absolute path of a stored object, so worker threads can read it directly. */
+  localPath(key: string): string {
+    return this.pathFor(key);
+  }
+
+  async remove(key: string): Promise<void> {
+    await rm(this.pathFor(key), { force: true });
   }
 
   async read(key: string): Promise<Buffer> {
