@@ -400,11 +400,24 @@ function lineSegment(pageEl: HTMLElement, clicked: HTMLElement, scale: number): 
   // pdf.js: font-size = scale-factor × minFontSize × fontHeight (see browserMinFontSize).
   const fontSize = parseFloat(getComputedStyle(clicked).fontSize) / scale / browserMinFontSize() || me.h;
   const midY = me.y + me.h / 2;
-  const line = all
+  const candidates = all
     .filter((o) => Math.abs(o.y + o.h / 2 - midY) < me.h * 0.35 && Math.abs(o.h - me.h) < me.h * 0.5)
     .sort((a, b) => a.x - b.x);
+  // Some PDFs draw each run twice at almost the same spot (fake bold, shadow, outline). Keep one
+  // copy of such stacked duplicates, or the editor shows every phrase twice.
+  const line: typeof candidates = [];
+  let target = me.el;
+  for (const o of candidates) {
+    const twin = line.find(
+      (k) =>
+        k.el.textContent === o.el.textContent &&
+        Math.min(k.x + k.w, o.x + o.w) - Math.max(k.x, o.x) > Math.min(k.w, o.w) * 0.6,
+    );
+    if (!twin) line.push(o);
+    else if (o.el === clicked) target = twin.el;
+  }
   const gapLimit = fontSize * 1.2;
-  let lo = line.findIndex((o) => o.el === clicked);
+  let lo = line.findIndex((o) => o.el === target);
   let hi = lo;
   while (lo > 0 && line[lo].x - (line[lo - 1].x + line[lo - 1].w) < gapLimit) lo--;
   while (hi < line.length - 1 && line[hi + 1].x - (line[hi].x + line[hi].w) < gapLimit) hi++;
