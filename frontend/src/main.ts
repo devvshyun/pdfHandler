@@ -10,6 +10,7 @@ import {
 import type { PDFDocumentProxy } from 'pdfjs-dist';
 import { Annotator, readImageFile, type CommitReports, type Tool } from './annotate';
 import { api, type ServerDocumentDetail } from './api';
+import { browserImageCodec } from './image-codec';
 import { rasterRotatedText } from './raster';
 import { buildSamplePdf } from './sample';
 import { $, ask, busy, downloadBytes, form, formatBytes, formatDate, setStatus, toast } from './ui';
@@ -142,6 +143,7 @@ async function commit(ops: PdfOperation[], label: string, keepPage?: number): Pr
     const out = await applyOperations(current(), ops, {
       onRedaction: (r) => reports.redactions.push(r),
       onReplaceText: (r) => reports.replacements.push(r),
+      imageCodec: browserImageCodec,
     });
     await pushBytes(out, label, keepPage);
   });

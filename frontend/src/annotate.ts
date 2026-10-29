@@ -383,7 +383,12 @@ function lineSegment(pageEl: HTMLElement, clicked: HTMLElement, scale: number): 
 function describeRedaction(r: RedactionReport): string {
   const parts = [r.removedGlyphs ? `글자 ${r.removedGlyphs}개를 파일에서 삭제` : '삭제할 글자 없음'];
   if (r.removedAnnotations) parts.push(`주석·입력란 ${r.removedAnnotations}개 삭제`);
-  if (r.imagesOverlapping) parts.push(`이미지 ${r.imagesOverlapping}개는 검게 덮기만 함(이미지 속 글자는 남음)`);
+  if (r.imagesRedacted) parts.push(`이미지 ${r.imagesRedacted}개의 해당 픽셀을 파일에서 지움`);
+  if (r.imagesUnredacted) {
+    const why = r.unredactedImageReasons.length ? `, 형식: ${r.unredactedImageReasons.join(', ')}` : '';
+    parts.push(`이미지 ${r.imagesUnredacted}개는 처리할 수 없는 형식이라 검게 덮기만 함(이미지 속 내용은 남음${why})`);
+  }
+  if (r.removedHiddenTexts) parts.push(`숨은 대체 텍스트 ${r.removedHiddenTexts}개 삭제`);
   if (r.approximateFonts) parts.push('일부 글꼴은 위치를 추정함(가장자리 확인 필요)');
   return parts.join(' · ');
 }
