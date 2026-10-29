@@ -10,6 +10,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { ensureBuilt, prepareDatabase, startServer, TestServer } from './harness';
 
 const skipReason = await prepareDatabase();
+if (skipReason && process.env.E2E_REQUIRED === '1') throw new Error(`[e2e] required but unavailable: ${skipReason}`);
 if (skipReason) console.warn(`\n[e2e] SKIPPED: ${skipReason}\n`);
 
 async function makePdf(pages: number, linesPerPage = 2): Promise<Uint8Array> {
