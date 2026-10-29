@@ -100,6 +100,28 @@ interface Ctx {
   /** Guards against Form XObjects that (directly or not) draw themselves. */
   formDepth: number;
   capture?: CapturedRun;
+  /** Read-only observer of every positioned glyph (see visitGlyphs). */
+  onGlyph?: (glyph: GlyphVisit) => void;
+}
+
+/** A glyph as the interpreter positions it; `box` and `trm` are in page user space. */
+export interface GlyphVisit {
+  code: number;
+  /** Byte length of the character code (distinguishes 1-byte from 2-byte codes). */
+  byteLength: number;
+  font: FontMetrics;
+  fontRaw?: PDFObject;
+  trm: Matrix;
+  /** Advance width of the glyph in text space (font size 1). */
+  width: number;
+  box: Rect;
+}
+
+/** Calls `onGlyph` for every glyph drawn on the page (Form XObjects included), changing nothing. */
+export function visitGlyphs(doc: PDFDocument, page: PDFPage, onGlyph: (glyph: GlyphVisit) => void): void {
+  const report: RedactionReport = { page: 0, removedGlyphs: 0, removedAnnotations: 0, imagesOverlapping: 0, approximateFonts: 0 };
+  const ctx: Ctx = { doc, areas: [], mode: 'overlap', report, fontCache: new Map(), formDepth: 0, onGlyph };
+  processStream(ctx, pageContentBytes(page), page.node.Resources() ?? doc.context.obj({}), IDENTITY);
 }
 
 /** Redacts `areas` (page user space) on one page. */
@@ -204,6 +226,7 @@ function processStream(ctx: Ctx, data: Uint8Array, resources: PDFDict, baseCtm: 
         const advance = (w * ts.Tfs + ts.Tc + (font.isSpace(code, end - start) ? ts.Tw : 0)) * ts.Th;
         const trm = mul([ts.Tfs * ts.Th, 0, 0, ts.Tfs, 0, ts.Trise], mul(Tm, gs.ctm));
         const box = boxOf(trm, 0, font.descent, w || 0.5, font.ascent);
+        ctx.onGlyph?.({ code, byteLength: end - start, font, fontRaw: ts.fontRaw, trm, width: w, box });
         const hit = ctx.areas.some((a) =>
           ctx.mode === 'center' ? contains(a, (box.x1 + box.x2) / 2, (box.y1 + box.y2) / 2) : overlaps(a, box),
         );
