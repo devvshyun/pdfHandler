@@ -82,29 +82,27 @@ export function buildTextMap(doc: PDFDocument, pageIndex: number, decoders = new
     raw.push({ g, text: t === null ? '�' : normalizeGlyphText(t), unknown: t === null });
   });
 
-  const glyphs: TextGlyph[] = [];
-  const lines: TextLine[] = [];
-  let text = '';
-  const map: number[] = [];
-  let lastChar = '';
-  const emit = (s: string, glyph: number) => {
-    text += s;
-    for (let i = 0; i < s.length; i++) map.push(glyph);
-    if (s) lastChar = s[s.length - 1];
-  };
+  // Phase 1: glyph records in content order, split into fragments (runs that continue forward on
+  // one baseline), with overprinted twins set aside.
+  const fragments: Fragment[] = [];
+  const duplicates: Rec[] = [];
   // Placed glyphs on a 2pt grid, for spotting glyphs drawn twice.
-  const seen = new Map<number, Array<{ t: string; x: number; y: number; line: number }>>();
+  const seen = new Map<number, Rec[]>();
   // Small-integer keys keep the map fast; distant cells may share a key, which only costs a compare.
   const cell = (cx: number, cy: number) => ((cx & 0x7fff) << 15) | (cy & 0x7fff);
   const findTwin = (t: string, cx: number, cy: number, ox: number, oy: number, tolerance: number) => {
     for (let kx = -1; kx <= 1; kx++)
       for (let ky = -1; ky <= 1; ky++) {
         const list = seen.get(cell(cx + kx, cy + ky));
-        if (list) for (const p of list) if (p.t === t && Math.abs(p.x - ox) < tolerance && Math.abs(p.y - oy) < tolerance) return p;
+        if (!list) continue;
+        for (const r of list) {
+          if (r.glyph.text === t && Math.abs(r.ox - ox) < tolerance && Math.abs(r.oy - oy) < tolerance) return r;
+        }
       }
     return undefined;
   };
   let prev: { ox: number; oy: number; ex: number; ey: number; dx: number; dy: number; size: number } | undefined;
+  let frag: Fragment | undefined;
   let unknownGlyphs = 0;
   let inDuplicateRun = false;
 
@@ -117,16 +115,15 @@ export function buildTextMap(doc: PDFDocument, pageIndex: number, decoders = new
     const dy = scaleX ? trm[1] / scaleX : 0;
     const ox = trm[4];
     const oy = trm[5];
-    const ex = ox + dx * g.width * scaleX;
-    const ey = oy + dy * g.width * scaleX;
+    const advance = g.width * scaleX;
     const box = frame.toVisualBox(g.box);
-    const glyph: TextGlyph = { x: box.x, y: box.y, width: box.width, height: box.height, text: t, line: lines.length - 1, fontSize: size };
+    const glyph: TextGlyph = { x: box.x, y: box.y, width: box.width, height: box.height, text: t, line: -1, fontSize: size };
     if (unknown) {
       glyph.unknown = true;
       unknownGlyphs++;
     }
 
-    let newLine = !prev;
+    let newFragment = !prev;
     let gap = 0;
     if (prev) {
       const sameDir = prev.dx * dx + prev.dy * dy > 0.99;
@@ -134,61 +131,132 @@ export function buildTextMap(doc: PDFDocument, pageIndex: number, decoders = new
       const across = Math.abs(prev.dx * (oy - prev.oy) - prev.dy * (ox - prev.ox));
       gap = prev.dx * (ox - prev.ex) + prev.dy * (oy - prev.ey);
       const em = Math.max(size, prev.size);
-      newLine = !sameDir || across > em * 0.5 || gap < -em * 0.6;
+      newFragment = !sameDir || across > em * 0.5 || gap < -em * 0.6;
     }
 
     // Identical glyph drawn on (almost) the same spot: fake bold or a shadow. Keep it for its box,
     // but leave it out of the text so "Hello" drawn twice still reads "Hello". Only a glyph that
-    // does not simply continue the line forward can repeat an earlier one, so only those are looked up.
+    // does not simply continue forward can repeat an earlier one, so only those are looked up.
     const cx = Math.round(ox / 2);
     const cy = Math.round(oy / 2);
     const blank = t === ' ';
-    const suspicious: boolean = newLine || gap < -size * 0.05 || inDuplicateRun;
-    const twin: { line: number } | undefined = blank || !suspicious ? undefined : findTwin(t, cx, cy, ox, oy, size * 0.1);
+    const suspicious: boolean = newFragment || gap < -size * 0.05 || inDuplicateRun;
+    const twin: Rec | undefined = blank || !suspicious ? undefined : findTwin(t, cx, cy, ox, oy, size * 0.1);
     inDuplicateRun = !!twin;
     if (twin) {
       glyph.duplicate = true;
-      glyph.line = twin.line;
-      glyphs.push(glyph);
+      duplicates.push({ glyph, ox, oy, t0: 0, t1: 0, twin });
       continue;
     }
-    const index = glyphs.length;
-    if (newLine) {
-      if (lines.length) emit('\n', -1);
-      lines.push({ ...box, start: index, end: index });
-    } else if (gap > Math.max(size, prev!.size) * 0.18 && t.trim() && !/\s/.test(lastChar)) {
-      emit(' ', -1);
+    if (newFragment || !frag) {
+      frag = { dx, dy, c: dx * oy - dy * ox, size, tStart: Infinity, tEnd: -Infinity, recs: [] };
+      fragments.push(frag);
     }
-    glyph.line = lines.length - 1;
-    glyphs.push(glyph);
+    const t0 = frag.dx * ox + frag.dy * oy;
+    const rec: Rec = { glyph, ox, oy, t0, t1: t0 + advance };
+    frag.recs.push(rec);
+    frag.tStart = Math.min(frag.tStart, t0);
+    frag.tEnd = Math.max(frag.tEnd, t0 + advance);
+    frag.size = Math.max(frag.size, size);
     if (!blank) {
       const k = cell(cx, cy);
-      const entry = { t, x: ox, y: oy, line: glyph.line };
       const list = seen.get(k);
-      if (list) list.push(entry);
-      else seen.set(k, [entry]);
+      if (list) list.push(rec);
+      else seen.set(k, [rec]);
     }
-    emit(t, index);
-    prev = { ox, oy, ex, ey, dx, dy, size };
+    prev = { ox, oy, ex: ox + dx * advance, ey: oy + dy * advance, dx, dy, size };
   }
 
-  // Line extents. Duplicates count for the line they repeat, so a line's glyph range may also
-  // contain glyphs of later lines; check `glyph.line` when walking it.
-  for (const line of lines) line.end = line.start;
-  glyphs.forEach((g, i) => {
-    const line = lines[g.line];
-    if (!line) return;
-    if (line.end > line.start) {
-      const u = unionBox(line, g);
-      line.x = u.x;
-      line.y = u.y;
-      line.width = u.width;
-      line.height = u.height;
+  // Phase 2: a fragment on the same baseline that fits beside (or into a gap of) an earlier line
+  // joins it, so text drawn later (an edit appended to the page, a table cell) reads in place.
+  const lineList: Fragment[] = [];
+  for (const f of fragments) {
+    const em = f.size;
+    const lo = f.tStart + em * 0.1;
+    const hi = f.tEnd - em * 0.1;
+    const fits = (l: Fragment) =>
+      l.dx * f.dx + l.dy * f.dy > 0.99 &&
+      Math.abs(l.c - f.c) <= Math.min(em, l.size) * 0.3 &&
+      f.tStart <= l.tEnd + em * 3 &&
+      f.tEnd >= l.tStart - em * 3 &&
+      // No glyph of the line may sit where this fragment's glyphs go.
+      !l.recs.some((r) => r.t1 > lo && r.t0 < hi && r.glyph.text !== ' ');
+    const target = lineList.find(fits);
+    if (target) {
+      target.recs.push(...f.recs);
+      target.tStart = Math.min(target.tStart, f.tStart);
+      target.tEnd = Math.max(target.tEnd, f.tEnd);
+      target.size = Math.max(target.size, f.size);
+    } else {
+      lineList.push({ ...f, recs: [...f.recs] });
     }
-    line.end = i + 1;
-  });
+  }
+
+  // Phase 3: text in line order, glyphs sorted along each line, virtual spaces for gaps.
+  const glyphs: TextGlyph[] = [];
+  const lines: TextLine[] = [];
+  let text = '';
+  const map: number[] = [];
+  for (const l of lineList) {
+    l.recs.sort((a, b) => a.t0 - b.t0); // stable: equal positions keep content order
+    const lineIndex = lines.length;
+    if (lineIndex) {
+      text += '\n';
+      map.push(-1);
+    }
+    const start = glyphs.length;
+    let last: Rec | undefined;
+    for (const r of l.recs) {
+      const t = r.glyph.text;
+      if (last && t.trim() && last.glyph.text.trim() && r.t0 - last.t1 > Math.max(r.glyph.fontSize, last.glyph.fontSize) * 0.18) {
+        text += ' ';
+        map.push(-1);
+      }
+      r.glyph.line = lineIndex;
+      const index = glyphs.length;
+      glyphs.push(r.glyph);
+      text += t;
+      for (let i = 0; i < t.length; i++) map.push(index);
+      last = r;
+    }
+    let box: Box = glyphs[start];
+    for (let i = start + 1; i < glyphs.length; i++) box = unionBox(box, glyphs[i]);
+    lines.push({ x: box.x, y: box.y, width: box.width, height: box.height, start, end: glyphs.length });
+  }
+  // Duplicates go last, attached to the line of the glyph they repeat (and widen its box).
+  for (const d of duplicates) {
+    d.glyph.line = d.twin!.glyph.line;
+    glyphs.push(d.glyph);
+    const line = lines[d.glyph.line];
+    if (line) {
+      const u = unionBox(line, d.glyph);
+      Object.assign(line, { x: u.x, y: u.y, width: u.width, height: u.height });
+    }
+  }
 
   return { page: pageIndex, width: frame.width, height: frame.height, glyphs, lines, text, charToGlyph: Int32Array.from(map), unknownGlyphs };
+}
+
+interface Rec {
+  glyph: TextGlyph;
+  ox: number;
+  oy: number;
+  /** Position of the origin and of the advance end along the fragment direction. */
+  t0: number;
+  t1: number;
+  twin?: Rec;
+}
+
+/** A run of glyphs continuing forward on one baseline; also used for merged lines. */
+interface Fragment {
+  dx: number;
+  dy: number;
+  /** Baseline offset across the direction. */
+  c: number;
+  size: number;
+  tStart: number;
+  tEnd: number;
+  recs: Rec[];
 }
 
 export function unionBox(a: Box, b: Box): Box {

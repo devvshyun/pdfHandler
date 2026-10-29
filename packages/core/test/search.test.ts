@@ -160,6 +160,17 @@ describe('text map', () => {
     expect(await pdfjsText(out)).toBe('FORMX');
   });
 
+  it('reads text drawn later on the same baseline in place (e.g. after replaceText)', async () => {
+    const { bytes } = await rawPage('BT /F1 20 Tf 50 300 Td (Keep this sentence intact.) Tj ET BT /F1 20 Tf 50 250 Td (Below) Tj ET');
+    const [m] = await findText(bytes, 'Keep this');
+    const out = await applyOperations(bytes, [{ type: 'replaceText', page: 0, area: m.boxes[0], text: 'Hold this', maxWidth: m.maxWidth }]);
+    const map = await getTextMap(out, 0);
+    expect(map.text).toBe('Hold this sentence intact.\nBelow');
+    // Text that would overlap existing glyphs stays a line of its own.
+    const { bytes: over } = await rawPage('BT /F1 20 Tf 50 300 Td (First) Tj ET BT /F1 20 Tf 52 300 Td (Other) Tj ET');
+    expect((await getTextMap(over, 0)).text).toBe('First\nOther');
+  });
+
   it('keeps fake-bold double drawing out of the text but inside the match', async () => {
     const { bytes } = await rawPage('BT /F1 20 Tf 50 300 Td (Bold) Tj ET BT /F1 20 Tf 50.4 300 Td (Bold) Tj ET');
     const map = await getTextMap(bytes, 0);
