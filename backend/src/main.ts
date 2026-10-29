@@ -15,7 +15,23 @@ async function bootstrap() {
   const logger = new Logger('Bootstrap');
 
   app.setGlobalPrefix('api');
-  app.enableCors();
+  app.set('trust proxy', config.get('trustProxy', { infer: true }));
+  // No CORS headers unless CORS_ORIGINS lists origins: the bundled frontend is same-origin and
+  // `vite dev` proxies /api, so cross-origin access is opt-in.
+  const origins = config.get('corsOrigins', { infer: true });
+  if (origins.length) {
+    app.enableCors({
+      origin: origins.includes('*') ? true : origins,
+      methods: ['GET', 'HEAD', 'POST', 'PATCH', 'DELETE'],
+      allowedHeaders: ['Authorization', 'Content-Type'],
+      exposedHeaders: ['Content-Disposition', 'Retry-After', 'X-RateLimit-Limit', 'X-RateLimit-Remaining', 'X-RateLimit-Reset'],
+      maxAge: 600,
+    });
+    logger.log(`CORS enabled for: ${origins.join(', ')}`);
+  }
+  if (!config.get('auth', { infer: true }).required) {
+    logger.warn('AUTH_REQUIRED=false: single-tenant mode, every visitor can read and delete every document.');
+  }
   app.enableShutdownHooks();
   app.useBodyParser('json', { limit: `${Math.ceil(config.get('storage', { infer: true }).maxUploadBytes / 1024 / 1024) * 2}mb` });
   app.useGlobalPipes(new ValidationPipe({ transform: true, whitelist: true }));

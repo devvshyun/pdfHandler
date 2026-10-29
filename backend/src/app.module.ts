@@ -1,6 +1,7 @@
 import { MikroOrmModule } from '@mikro-orm/nestjs';
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
+import { AuthModule } from './auth/auth.module';
 import { CommonModule } from './common/common.module';
 import { loadConfig } from './config/configuration';
 import { DocumentsModule } from './documents/documents.module';
@@ -16,6 +17,7 @@ import { ToolsModule } from './tools/tools.module';
     MikroOrmModule.forRoot(ormConfig),
     CommonModule,
     RedisModule,
+    AuthModule,
     StorageModule,
     DocumentsModule,
     ToolsModule,
