@@ -86,18 +86,32 @@ export function buildTextMap(doc: PDFDocument, pageIndex: number, decoders = new
   const lines: TextLine[] = [];
   let text = '';
   const map: number[] = [];
+  let lastChar = '';
   const emit = (s: string, glyph: number) => {
     text += s;
     for (let i = 0; i < s.length; i++) map.push(glyph);
+    if (s) lastChar = s[s.length - 1];
   };
-  const seen = new Map<string, Array<{ x: number; y: number }>>();
+  // Placed glyphs on a 2pt grid, for spotting glyphs drawn twice.
+  const seen = new Map<number, Array<{ t: string; x: number; y: number; line: number }>>();
+  // Small-integer keys keep the map fast; distant cells may share a key, which only costs a compare.
+  const cell = (cx: number, cy: number) => ((cx & 0x7fff) << 15) | (cy & 0x7fff);
+  const findTwin = (t: string, cx: number, cy: number, ox: number, oy: number, tolerance: number) => {
+    for (let kx = -1; kx <= 1; kx++)
+      for (let ky = -1; ky <= 1; ky++) {
+        const list = seen.get(cell(cx + kx, cy + ky));
+        if (list) for (const p of list) if (p.t === t && Math.abs(p.x - ox) < tolerance && Math.abs(p.y - oy) < tolerance) return p;
+      }
+    return undefined;
+  };
   let prev: { ox: number; oy: number; ex: number; ey: number; dx: number; dy: number; size: number } | undefined;
   let unknownGlyphs = 0;
+  let inDuplicateRun = false;
 
   for (const { g, text: t, unknown } of raw) {
     const { trm } = g;
-    const scaleX = Math.hypot(trm[0], trm[1]);
-    const size = Math.hypot(trm[2], trm[3]) || scaleX;
+    const scaleX = Math.sqrt(trm[0] * trm[0] + trm[1] * trm[1]);
+    const size = Math.sqrt(trm[2] * trm[2] + trm[3] * trm[3]) || scaleX;
     if (!(size > 0) || !Number.isFinite(trm[4]) || !Number.isFinite(trm[5])) continue;
     const dx = scaleX ? trm[0] / scaleX : 1;
     const dy = scaleX ? trm[1] / scaleX : 0;
@@ -106,29 +120,11 @@ export function buildTextMap(doc: PDFDocument, pageIndex: number, decoders = new
     const ex = ox + dx * g.width * scaleX;
     const ey = oy + dy * g.width * scaleX;
     const box = frame.toVisualBox(g.box);
-    const glyph: TextGlyph = { ...box, text: t, line: lines.length - 1, fontSize: size };
+    const glyph: TextGlyph = { x: box.x, y: box.y, width: box.width, height: box.height, text: t, line: lines.length - 1, fontSize: size };
     if (unknown) {
       glyph.unknown = true;
       unknownGlyphs++;
     }
-
-    // Identical glyph drawn on (almost) the same spot: fake bold or a shadow. Keep it for its box,
-    // but leave it out of the text so "Hello" drawn twice still reads "Hello".
-    const key = `${t}@${Math.round(ox / 2)},${Math.round(oy / 2)}`;
-    const near = (seen.get(key) ?? []).some((p) => Math.hypot(p.x - ox, p.y - oy) < size * 0.15);
-    if (near && t.trim()) {
-      glyph.duplicate = true;
-      glyph.line = Math.max(0, lines.length - 1);
-      glyphs.push(glyph);
-      continue;
-    }
-    for (const kx of [-1, 0, 1])
-      for (const ky of [-1, 0, 1]) {
-        const k = `${t}@${Math.round(ox / 2) + kx},${Math.round(oy / 2) + ky}`;
-        const list = seen.get(k) ?? [];
-        list.push({ x: ox, y: oy });
-        seen.set(k, list);
-      }
 
     let newLine = !prev;
     let gap = 0;
@@ -140,26 +136,55 @@ export function buildTextMap(doc: PDFDocument, pageIndex: number, decoders = new
       const em = Math.max(size, prev.size);
       newLine = !sameDir || across > em * 0.5 || gap < -em * 0.6;
     }
+
+    // Identical glyph drawn on (almost) the same spot: fake bold or a shadow. Keep it for its box,
+    // but leave it out of the text so "Hello" drawn twice still reads "Hello". Only a glyph that
+    // does not simply continue the line forward can repeat an earlier one, so only those are looked up.
+    const cx = Math.round(ox / 2);
+    const cy = Math.round(oy / 2);
+    const blank = t === ' ';
+    const suspicious: boolean = newLine || gap < -size * 0.05 || inDuplicateRun;
+    const twin: { line: number } | undefined = blank || !suspicious ? undefined : findTwin(t, cx, cy, ox, oy, size * 0.1);
+    inDuplicateRun = !!twin;
+    if (twin) {
+      glyph.duplicate = true;
+      glyph.line = twin.line;
+      glyphs.push(glyph);
+      continue;
+    }
     const index = glyphs.length;
     if (newLine) {
       if (lines.length) emit('\n', -1);
       lines.push({ ...box, start: index, end: index });
-    } else if (gap > Math.max(size, prev!.size) * 0.18 && t.trim() && !/\s$/.test(text)) {
+    } else if (gap > Math.max(size, prev!.size) * 0.18 && t.trim() && !/\s/.test(lastChar)) {
       emit(' ', -1);
     }
     glyph.line = lines.length - 1;
     glyphs.push(glyph);
+    if (!blank) {
+      const k = cell(cx, cy);
+      const entry = { t, x: ox, y: oy, line: glyph.line };
+      const list = seen.get(k);
+      if (list) list.push(entry);
+      else seen.set(k, [entry]);
+    }
     emit(t, index);
     prev = { ox, oy, ex, ey, dx, dy, size };
   }
 
-  // Line extents (duplicates included: they are drawn on the line they repeat).
+  // Line extents. Duplicates count for the line they repeat, so a line's glyph range may also
+  // contain glyphs of later lines; check `glyph.line` when walking it.
   for (const line of lines) line.end = line.start;
   glyphs.forEach((g, i) => {
     const line = lines[g.line];
     if (!line) return;
-    if (line.end === line.start) Object.assign(line, { x: g.x, y: g.y, width: g.width, height: g.height });
-    else Object.assign(line, unionBox(line, g));
+    if (line.end > line.start) {
+      const u = unionBox(line, g);
+      line.x = u.x;
+      line.y = u.y;
+      line.width = u.width;
+      line.height = u.height;
+    }
     line.end = i + 1;
   });
 
@@ -173,9 +198,15 @@ export function unionBox(a: Box, b: Box): Box {
 }
 
 /** Compatibility forms (fullwidth digits, ligatures, non-breaking spaces) as plain characters. */
+const normalized = new Map<string, string>();
 function normalizeGlyphText(t: string): string {
-  const n = t.normalize('NFKC');
-  return /^\s+$/.test(n) ? ' ' : n.replace(/[\u0000-\u001f]/g, '');
+  let out = normalized.get(t);
+  if (out === undefined) {
+    const n = t.normalize('NFKC');
+    out = /^\s+$/.test(n) ? ' ' : n.replace(/[\u0000-\u001f]/g, '');
+    if (normalized.size < 20000) normalized.set(t, out);
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------

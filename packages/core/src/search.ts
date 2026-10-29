@@ -187,6 +187,17 @@ export function findInTextMap(map: PageTextMap, query: Query, options: Pick<Find
   return out;
 }
 
+const margins = new WeakMap<PageTextMap, number>();
+function leftMarginOf(map: PageTextMap): number {
+  let m = margins.get(map);
+  if (m === undefined) {
+    m = Infinity;
+    for (const g of map.glyphs) if (g.x < m) m = g.x;
+    margins.set(map, m);
+  }
+  return m;
+}
+
 function toMatch(map: PageTextMap, start: number, end: number): TextMatch | null {
   const glyphs: number[] = [];
   for (let i = start; i < end; i++) {
@@ -218,12 +229,12 @@ function toMatch(map: PageTextMap, start: number, end: number): TextMatch | null
   let next: number | undefined;
   for (let i = lastOnLine + 1; i < line.end; i++) {
     const g = map.glyphs[i];
-    if (!g.duplicate && g.text.trim() && g.x >= firstBox.x + firstBox.width - 0.5) {
+    if (g.line === first.line && !g.duplicate && g.text.trim() && g.x >= firstBox.x + firstBox.width - 0.5) {
       next = i;
       break;
     }
   }
-  const leftMargin = Math.min(...map.glyphs.map((g) => g.x));
+  const leftMargin = leftMarginOf(map);
   const limit = next !== undefined ? map.glyphs[next].x - first.fontSize * 0.3 : Math.max(firstBox.x + firstBox.width, map.width - leftMargin);
   const flat = (s: string) => s.replace(/\n/g, ' ');
   return {

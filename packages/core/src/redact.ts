@@ -47,12 +47,14 @@ const mul = (m: Matrix, n: Matrix): Matrix => [
 const apply = (m: Matrix, x: number, y: number) => ({ x: m[0] * x + m[2] * y + m[4], y: m[1] * x + m[3] * y + m[5] });
 
 function boxOf(m: Matrix, x1: number, y1: number, x2: number, y2: number): Rect {
-  const pts = [apply(m, x1, y1), apply(m, x2, y1), apply(m, x1, y2), apply(m, x2, y2)];
+  // Extents of the transformed corners, without intermediate arrays (called for every glyph).
+  const ax = m[0] * x1, bx = m[0] * x2, cx = m[2] * y1, dx = m[2] * y2;
+  const ay = m[1] * x1, by = m[1] * x2, cy = m[3] * y1, dy = m[3] * y2;
   return {
-    x1: Math.min(...pts.map((p) => p.x)),
-    y1: Math.min(...pts.map((p) => p.y)),
-    x2: Math.max(...pts.map((p) => p.x)),
-    y2: Math.max(...pts.map((p) => p.y)),
+    x1: Math.min(ax, bx) + Math.min(cx, dx) + m[4],
+    y1: Math.min(ay, by) + Math.min(cy, dy) + m[5],
+    x2: Math.max(ax, bx) + Math.max(cx, dx) + m[4],
+    y2: Math.max(ay, by) + Math.max(cy, dy) + m[5],
   };
 }
 
