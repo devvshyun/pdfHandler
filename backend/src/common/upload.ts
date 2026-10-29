@@ -13,7 +13,7 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { FileInterceptor, FilesInterceptor } from '@nestjs/platform-express';
 import { isPdf } from '@pdfhandler/core';
-import { Request, Response } from 'express';
+import { Request } from 'express';
 import { open, rm } from 'node:fs/promises';
 import { catchError, finalize, Observable, throwError } from 'rxjs';
 import { AppConfig } from '../config/configuration';
@@ -39,8 +39,9 @@ export class UploadLimitsInterceptor implements NestInterceptor {
     const { maxTotalBytes } = this.config.get('upload', { infer: true });
     const declared = Number(req.headers['content-length']);
     if (Number.isFinite(declared) && declared > maxTotalBytes) {
-      // The body is never read; close the connection instead of draining it.
-      context.switchToHttp().getResponse<Response>().setHeader('Connection', 'close');
+      // Nothing is parsed or stored: Node discards the rest of the body, so clients that only
+      // read the response after sending everything still get this 413 (closing the socket
+      // early would surface as a network error in fetch()).
       throw new PayloadTooLargeException(`요청 전체 크기가 한도(${mb(maxTotalBytes)}MB)를 넘습니다.`);
     }
     return next.handle().pipe(
@@ -84,7 +85,8 @@ function uploadedFiles(req: Request): Express.Multer.File[] {
 }
 
 function translateMulterError(e: unknown, config: ConfigService<AppConfig, true>): unknown {
-  if (!(e instanceof HttpException) || e.getStatus() !== 413) return e;
+  // Nest maps multer's LIMIT_FILE_SIZE to 413 but LIMIT_FILE_COUNT to 400; both become a Korean 413.
+  if (!(e instanceof HttpException) || ![400, 413].includes(e.getStatus())) return e;
   const msg = String((e.getResponse() as { message?: string }).message ?? e.message);
   const { maxFiles } = config.get('upload', { infer: true });
   const { maxUploadBytes } = config.get('storage', { infer: true });

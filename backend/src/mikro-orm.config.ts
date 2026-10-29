@@ -27,8 +27,10 @@ export default defineConfig({
       { name: 'Migration20261029044818', class: Migration20261029044818 },
     ],
     transactional: true,
-    // Fixed name: otherwise the snapshot file is named after DB_NAME.
+    // Fixed name: otherwise the snapshot file is named after DB_NAME. Only the CLI (which loads
+    // this file as TypeScript) maintains it; the running app must not rewrite files in src/.
     snapshotName: '.snapshot-pdfhandler',
+    snapshot: __filename.endsWith('.ts'),
   },
   debug: process.env.DB_DEBUG === 'true',
 });
