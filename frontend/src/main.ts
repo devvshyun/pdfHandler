@@ -69,6 +69,7 @@ const annotator = new Annotator({
   commit: (ops, label) => commit(ops, label),
   pickImage: () => pickFile('#file-image').then((files) => (files[0] ? readImageFile(files[0]) : null)),
   resetTool: () => setTool('select'),
+  toast: (message) => toast(message, 'error'),
 });
 
 async function render(keepPage = viewer.current): Promise<void> {
@@ -716,6 +717,7 @@ document.querySelectorAll<HTMLElement>('[data-tool]').forEach((b) =>
     if (tool === 'image' && !(await annotator.armImage())) return;
     setTool(tool);
     if (tool === 'image') toast('이미지를 넣을 위치를 클릭하세요');
+    if (tool === 'edit-text') toast('고칠 텍스트를 클릭하세요 (Enter 적용, Esc 취소)');
   }),
 );
 

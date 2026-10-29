@@ -4,7 +4,7 @@ import { bytesToBase64, type PdfOperation } from '@pdfhandler/core';
 import { rasterShape, rasterStroke, rasterText, type ShapeKind, type Stroke } from './raster';
 import type { Viewer } from './viewer';
 
-export type Tool = 'select' | 'text' | 'pen' | 'highlight' | 'rect' | 'whiteout' | 'image';
+export type Tool = 'select' | 'edit-text' | 'text' | 'pen' | 'highlight' | 'rect' | 'whiteout' | 'image';
 
 export interface AnnotatorHost {
   viewer: Viewer;
@@ -14,6 +14,7 @@ export interface AnnotatorHost {
   commit(ops: PdfOperation[], label: string): Promise<void>;
   pickImage(): Promise<{ base64: string; width: number; height: number } | null>;
   resetTool(): void;
+  toast(message: string): void;
 }
 
 export class Annotator {
@@ -23,6 +24,13 @@ export class Annotator {
 
   /** Called by the viewer whenever it creates a page overlay. */
   attach(index: number, overlay: HTMLDivElement): void {
+    // Existing text is picked from pdf.js's text layer, which sits under the overlay;
+    // in this mode the overlay lets clicks through (see styles.css).
+    overlay.parentElement!.addEventListener('click', (e) => {
+      if (this.host.tool() !== 'edit-text') return;
+      const span = (e.target as HTMLElement).closest<HTMLElement>('.textLayer span');
+      if (span && span.textContent?.trim()) this.startEditText(index, span);
+    });
     overlay.addEventListener('pointerdown', (e) => {
       if (e.button !== 0) return;
       switch (this.host.tool()) {
@@ -84,6 +92,86 @@ export class Annotator {
       if (k.key === 'Escape') void finish(false);
       if (k.key === 'Enter' && (k.ctrlKey || k.metaKey)) box.blur();
       k.stopPropagation();
+    });
+  }
+
+  /**
+   * Replaces a run of existing text: the original is covered with a box in the sampled background
+   * colour and the new text is drawn on top in the sampled text colour. The original glyphs stay in
+   * the file underneath, so this is not a redaction.
+   */
+  private startEditText(index: number, span: HTMLElement): void {
+    if (document.querySelector('.inline-text')) return;
+    if (/rotate/.test(span.style.transform)) {
+      this.host.toast('기울어지거나 세로로 놓인 텍스트는 수정할 수 없습니다.');
+      return;
+    }
+    const { viewer } = this.host;
+    const pageEl = viewer.pageElement(index)!;
+    const pageRect = pageEl.getBoundingClientRect();
+    const r = span.getBoundingClientRect();
+    const box = {
+      x: (r.left - pageRect.left) / viewer.scale,
+      y: (r.top - pageRect.top) / viewer.scale,
+      width: r.width / viewer.scale,
+      height: r.height / viewer.scale,
+    };
+    const fontSize = parseFloat(getComputedStyle(span).fontSize) / viewer.scale || box.height;
+    const serif = /(^|[^-])serif/i.test(getComputedStyle(span).fontFamily) && !/sans/i.test(getComputedStyle(span).fontFamily);
+    const colors = sampleColors(pageEl.querySelector<HTMLCanvasElement>('canvas.render')!, pageEl, r);
+    const original = span.textContent ?? '';
+
+    const input = document.createElement('textarea');
+    input.className = 'inline-text editing';
+    input.value = original;
+    input.rows = 1;
+    Object.assign(input.style, {
+      left: `${box.x * viewer.scale - 2}px`,
+      top: `${box.y * viewer.scale - 2}px`,
+      width: `${Math.max(box.width * viewer.scale + 24, 80)}px`,
+      fontSize: `${fontSize * viewer.scale}px`,
+      color: colors.fg,
+      background: colors.bg,
+      fontFamily: serif ? 'serif' : '',
+    });
+    pageEl.append(input);
+    input.focus();
+    input.select();
+
+    let done = false;
+    const finish = async (save: boolean) => {
+      if (done) return;
+      done = true;
+      const text = input.value.replace(/\s+$/, '');
+      input.remove();
+      if (!save || text === original) return;
+      const pad = Math.max(1, fontSize * 0.08);
+      // A solid fill in the sampled background colour (also works on tinted backgrounds).
+      const cover = await rasterShape('highlight', box.width + pad * 2, box.height + pad * 2, colors.bg, 0);
+      const ops: PdfOperation[] = [
+        { type: 'addImage', page: index, x: box.x - pad, y: box.y - pad, width: box.width + pad * 2, height: box.height + pad * 2, imageBase64: cover },
+      ];
+      if (text) {
+        if (/^[\x20-\x7e\n]*$/.test(text) && !serif) {
+          // Latin text goes in as real text (selectable and searchable) in Helvetica.
+          // addText takes the top of the text box; Helvetica's ascent is ~0.72 of the size.
+          ops.push({ type: 'addText', page: index, x: box.x, y: box.y + box.height * 0.82 - fontSize, text, fontSize, color: hexToRgb(colors.fg) });
+        } else {
+          const img = await rasterText(text, fontSize, colors.fg, false, serif);
+          // rasterText centres glyphs in a 1.25em line box.
+          ops.push({ type: 'addImage', page: index, x: box.x - 1, y: box.y - fontSize * 0.125 - (box.height - fontSize) / 2, width: img.width, height: img.height, imageBase64: img.base64 });
+        }
+      }
+      await this.host.commit(ops, text ? '텍스트 수정' : '텍스트 삭제');
+    };
+    input.addEventListener('blur', () => void finish(true));
+    input.addEventListener('keydown', (k) => {
+      k.stopPropagation();
+      if (k.key === 'Escape') void finish(false);
+      else if (k.key === 'Enter' && !k.shiftKey) {
+        k.preventDefault();
+        input.blur();
+      }
     });
   }
 
@@ -213,6 +301,57 @@ export class Annotator {
     );
     this.host.resetTool();
   }
+}
+
+/** Picks the background (most common edge colour) and ink (furthest from it) under a text run. */
+function sampleColors(canvas: HTMLCanvasElement, pageEl: HTMLElement, r: DOMRect): { fg: string; bg: string } {
+  const fallback = { fg: '#000000', bg: '#ffffff' };
+  const pageRect = pageEl.getBoundingClientRect();
+  const k = canvas.width / pageRect.width;
+  const x = Math.max(0, Math.floor((r.left - pageRect.left) * k));
+  const y = Math.max(0, Math.floor((r.top - pageRect.top) * k));
+  const w = Math.min(canvas.width - x, Math.ceil(r.width * k));
+  const h = Math.min(canvas.height - y, Math.ceil(r.height * k));
+  if (w < 2 || h < 2) return fallback;
+  const data = canvas.getContext('2d')!.getImageData(x, y, w, h).data;
+  const px = (i: number) => [data[i], data[i + 1], data[i + 2]];
+  // Bucket edge pixels coarsely, then average the real pixels of the most common bucket.
+  const buckets = new Map<string, { n: number; sum: number[] }>();
+  const edge = (cx: number, cy: number) => {
+    const c = px((cy * w + cx) * 4);
+    const key = c.map((v) => v >> 4).join(',');
+    const b = buckets.get(key) ?? { n: 0, sum: [0, 0, 0] };
+    b.n++;
+    c.forEach((v, j) => (b.sum[j] += v));
+    buckets.set(key, b);
+  };
+  for (let cx = 0; cx < w; cx++) {
+    edge(cx, 0);
+    edge(cx, h - 1);
+  }
+  for (let cy = 0; cy < h; cy++) {
+    edge(0, cy);
+    edge(w - 1, cy);
+  }
+  const top = [...buckets.values()].sort((a, b) => b.n - a.n)[0];
+  const bg = top.sum.map((v) => Math.round(v / top.n));
+  let best = 0;
+  let fg = [0, 0, 0];
+  for (let i = 0; i < data.length; i += 4) {
+    const c = px(i);
+    const d = Math.abs(c[0] - bg[0]) + Math.abs(c[1] - bg[1]) + Math.abs(c[2] - bg[2]);
+    if (d > best) {
+      best = d;
+      fg = c;
+    }
+  }
+  const hex = (c: number[]) => `#${c.map((v) => v.toString(16).padStart(2, '0')).join('')}`;
+  return { fg: best > 60 ? hex(fg) : fallback.fg, bg: hex(bg) };
+}
+
+function hexToRgb(hex: string): { r: number; g: number; b: number } {
+  const n = parseInt(hex.slice(1), 16);
+  return { r: ((n >> 16) & 255) / 255, g: ((n >> 8) & 255) / 255, b: (n & 255) / 255 };
 }
 
 export async function readImageFile(file: File): Promise<{ base64: string; width: number; height: number }> {

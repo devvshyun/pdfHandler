@@ -417,8 +417,26 @@ body:not([data-tool='select']) .page .overlay {
   cursor: crosshair;
 }
 
-body[data-tool='select'] .page .overlay {
+body[data-tool='select'] .page .overlay,
+body[data-tool='edit-text'] .page .overlay {
   pointer-events: none;
+}
+
+body[data-tool='edit-text'] .textLayer span {
+  cursor: pointer;
+  border-radius: 2px;
+}
+
+body[data-tool='edit-text'] .textLayer span:hover {
+  background: color-mix(in srgb, var(--select) 18%, transparent);
+  outline: 1px solid var(--select);
+}
+
+.page .inline-text.editing {
+  border-style: solid;
+  resize: none;
+  overflow: hidden;
+  white-space: pre;
 }
 
 .page .inline-text {

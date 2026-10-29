@@ -5,6 +5,7 @@ import { bytesToBase64 } from '@pdfhandler/core';
 /** Oversampling factor: PNG pixels per PDF point. */
 const DPI_SCALE = 3;
 const FONT_STACK = `'Pretendard', 'Apple SD Gothic Neo', 'Malgun Gothic', 'Noto Sans KR', system-ui, sans-serif`;
+const SERIF_STACK = `'AppleMyungjo', 'Batang', 'Noto Serif KR', 'Times New Roman', serif`;
 
 export interface RasterResult {
   base64: string;
@@ -21,10 +22,16 @@ export async function canvasToBase64(canvas: HTMLCanvasElement): Promise<string>
 }
 
 /** Multi-line text, `fontSize` in points. */
-export async function rasterText(text: string, fontSize: number, color: string, bold = false): Promise<RasterResult> {
+export async function rasterText(
+  text: string,
+  fontSize: number,
+  color: string,
+  bold = false,
+  serif = false,
+): Promise<RasterResult> {
   const lines = text.split(/\r?\n/);
   const lineHeight = fontSize * 1.25;
-  const font = `${bold ? '700 ' : ''}${fontSize * DPI_SCALE}px ${FONT_STACK}`;
+  const font = `${bold ? '700 ' : ''}${fontSize * DPI_SCALE}px ${serif ? SERIF_STACK : FONT_STACK}`;
   const measure = document.createElement('canvas').getContext('2d')!;
   measure.font = font;
   const widthPt = Math.max(...lines.map((l) => measure.measureText(l).width)) / DPI_SCALE + 2;
