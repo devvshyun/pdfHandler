@@ -1,0 +1,51 @@
+{
+  "name": "backend",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "build": "nest build",
+    "start": "node dist/main.js",
+    "start:dev": "nest start --watch",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "migration:create": "mikro-orm migration:create",
+    "migration:up": "mikro-orm migration:up",
+    "migration:down": "mikro-orm migration:down"
+  },
+  "mikro-orm": {
+    "configPaths": [
+      "./src/mikro-orm.config.ts",
+      "./dist/mikro-orm.config.js"
+    ]
+  },
+  "dependencies": {
+    "@mikro-orm/core": "^6.6.17",
+    "@mikro-orm/migrations": "^6.6.17",
+    "@mikro-orm/mysql": "^6.6.17",
+    "@mikro-orm/nestjs": "^6.1.2",
+    "@nestjs/common": "^11.2.8",
+    "@nestjs/config": "^4.0.4",
+    "@nestjs/core": "^11.2.8",
+    "@nestjs/platform-express": "^11.2.8",
+    "@nestjs/serve-static": "^5.0.5",
+    "@pdfhandler/core": "0.1.0",
+    "class-transformer": "^0.5.1",
+    "class-validator": "^0.15.1",
+    "dotenv": "^16.6.1",
+    "ioredis": "^5.11.1",
+    "multer": "^2.5.0",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.1"
+  },
+  "devDependencies": {
+    "@mikro-orm/cli": "^6.6.17",
+    "@nestjs/cli": "^11.0.24",
+    "@nestjs/testing": "^11.2.8",
+    "@types/express": "^5.0.0",
+    "@types/multer": "^1.4.12",
+    "@types/node": "^22.10.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.6.3",
+    "vitest": "^3.2.7"
+  }
+}

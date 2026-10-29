@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>pdfHandler - 웹 PDF 뷰어/편집기</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%23d93025'/><text x='16' y='21' font-size='11' font-family='Arial' font-weight='700' text-anchor='middle' fill='white'>PDF</text></svg>" />
+    <link rel="stylesheet" href="/src/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">pdf<span>Handler</span></div>
+
+      <div class="toolbar" role="toolbar">
+        <div class="group">
+          <button data-action="open" title="열기 (Ctrl+O)">열기</button>
+          <button data-action="download" title="다운로드 (Ctrl+S)" data-needs-doc>다운로드</button>
+          <button data-action="save-server" title="서버에 저장" data-needs-doc data-needs-server>서버 저장</button>
+        </div>
+        <div class="group">
+          <button data-action="undo" title="실행 취소 (Ctrl+Z)" data-needs-doc>↶</button>
+          <button data-action="redo" title="다시 실행 (Ctrl+Shift+Z)" data-needs-doc>↷</button>
+        </div>
+        <div class="group">
+          <button data-action="zoom-out" title="축소 (-)" data-needs-doc>－</button>
+          <select id="zoom" title="배율" data-needs-doc>
+            <option value="fit-width">폭 맞춤</option>
+            <option value="fit-page">쪽 맞춤</option>
+            <option value="0.5">50%</option>
+            <option value="0.75">75%</option>
+            <option value="1">100%</option>
+            <option value="1.25">125%</option>
+            <option value="1.5">150%</option>
+            <option value="2">200%</option>
+            <option value="3">300%</option>
+          </select>
+          <button data-action="zoom-in" title="확대 (+)" data-needs-doc>＋</button>
+        </div>
+        <div class="group pager">
+          <button data-action="prev" title="이전 쪽" data-needs-doc>‹</button>
+          <input id="page-input" type="number" min="1" value="1" data-needs-doc />
+          <span id="page-total">/ 0</span>
+          <button data-action="next" title="다음 쪽" data-needs-doc>›</button>
+        </div>
+        <div class="group">
+          <button data-action="rotate-left" title="왼쪽으로 회전" data-needs-doc>⟲</button>
+          <button data-action="rotate-right" title="오른쪽으로 회전" data-needs-doc>⟳</button>
+          <button data-action="delete" title="선택 쪽 삭제 (Delete)" data-needs-doc>쪽 삭제</button>
+          <button data-action="duplicate" title="쪽 복제" data-needs-doc>복제</button>
+          <button data-action="insert-blank" title="빈 쪽 삽입" data-needs-doc>빈 쪽</button>
+        </div>
+        <div class="group">
+          <button data-action="merge" title="다른 PDF를 뒤에 붙이기" data-needs-doc>병합</button>
+          <button data-action="split" title="여러 파일로 나누기" data-needs-doc>분할</button>
+          <button data-action="extract" title="선택 쪽만 새 PDF로" data-needs-doc>추출</button>
+        </div>
+        <div class="group">
+          <button data-action="watermark" title="워터마크" data-needs-doc>워터마크</button>
+          <button data-action="page-numbers" title="쪽 번호" data-needs-doc>쪽 번호</button>
+          <button data-action="metadata" title="문서 속성" data-needs-doc>속성</button>
+        </div>
+      </div>
+    </header>
+
+    <div class="annotbar" role="toolbar" aria-label="주석 도구">
+      <span class="label">도구</span>
+      <button class="tool active" data-tool="select" title="선택 / 텍스트 복사">선택</button>
+      <button class="tool" data-tool="text" title="클릭한 위치에 텍스트">텍스트</button>
+      <button class="tool" data-tool="pen" title="자유 그리기">펜</button>
+      <button class="tool" data-tool="highlight" title="드래그로 형광펜">형광펜</button>
+      <button class="tool" data-tool="rect" title="드래그로 사각형 테두리">사각형</button>
+      <button class="tool" data-tool="whiteout" title="드래그로 영역 가리기(흰색)">가리기</button>
+      <button class="tool" data-tool="image" title="이미지/서명 삽입">이미지</button>
+      <label class="opt">색 <input id="tool-color" type="color" value="#d93025" /></label>
+      <label class="opt">크기 <input id="tool-size" type="number" min="1" max="96" value="16" /></label>
+      <span class="spacer"></span>
+      <input id="search-input" type="search" placeholder="문서 내 검색" data-needs-doc />
+    </div>
+
+    <main class="layout">
+      <aside class="sidebar" id="sidebar">
+        <div class="sidebar-head">
+          <span>쪽</span>
+          <span class="hint">드래그로 순서 변경 · Ctrl/Shift 다중 선택</span>
+        </div>
+        <div id="thumbnails" class="thumbnails"></div>
+      </aside>
+
+      <section class="viewer" id="viewer">
+        <div class="dropzone" id="dropzone">
+          <div class="dropzone-inner">
+            <h1>PDF 파일을 여기로 끌어다 놓으세요</h1>
+            <p>또는 <button data-action="open" class="link">파일 선택</button></p>
+            <p class="muted">
+              파일은 브라우저 안에서 처리됩니다(pdf.js + pdf-lib). 서버 저장을 누를 때만 업로드됩니다.
+            </p>
+          </div>
+        </div>
+        <div id="pages" class="pages"></div>
+      </section>
+
+      <aside class="panel" id="panel">
+        <section>
+          <h2>문서 정보</h2>
+          <dl id="doc-info" class="info"><dt>파일</dt><dd>-</dd></dl>
+        </section>
+        <section id="search-section" hidden>
+          <h2>검색 결과 <span id="search-count"></span></h2>
+          <ol id="search-results" class="search-results"></ol>
+        </section>
+        <section>
+          <h2>서버 문서함 <span id="server-status" class="badge">확인 중</span></h2>
+          <div id="library" class="library"></div>
+        </section>
+        <section id="versions-section" hidden>
+          <h2>버전 기록</h2>
+          <ol id="versions" class="versions"></ol>
+        </section>
+      </aside>
+    </main>
+
+    <footer class="statusbar">
+      <span id="status">준비</span>
+      <span id="dirty" hidden>저장되지 않은 변경</span>
+    </footer>
+
+    <input id="file-open" type="file" accept="application/pdf,.pdf" hidden />
+    <input id="file-merge" type="file" accept="application/pdf,.pdf" multiple hidden />
+    <input id="file-image" type="file" accept="image/png,image/jpeg" hidden />
+
+    <dialog id="dialog">
+      <form method="dialog" id="dialog-form">
+        <h3 id="dialog-title"></h3>
+        <div id="dialog-body"></div>
+        <menu>
+          <button value="ok" class="primary" id="dialog-ok">확인</button>
+          <button value="cancel" formnovalidate>취소</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

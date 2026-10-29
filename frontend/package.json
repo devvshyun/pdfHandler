@@ -1,0 +1,24 @@
+{
+  "name": "frontend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "copy-pdfjs-assets": "node scripts/copy-pdfjs-assets.mjs",
+    "predev": "npm run copy-pdfjs-assets",
+    "dev": "vite",
+    "prebuild": "npm run copy-pdfjs-assets",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@pdfhandler/core": "0.1.0",
+    "pdf-lib": "^1.17.1",
+    "pdfjs-dist": "4.10.38"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3",
+    "vite": "^6.4.5"
+  }
+}
