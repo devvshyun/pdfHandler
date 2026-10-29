@@ -1,5 +1,7 @@
 # pdfHandler
 
+**데모**: https://devvshyun.github.io/pdfHandler/ (브라우저 전용 모드: 편집 기능은 모두 동작하고, 문서함·로그인 같은 서버 기능은 빠져 있습니다)
+
 브라우저에서 PDF를 열람·편집하는 웹 애플리케이션입니다. [rhwp](https://edwardkim.github.io/rhwp/)가 HWP를 브라우저 안에서 처리하듯, PDF 렌더링과 편집을 클라이언트에서 수행하고 백엔드는 문서 보관·버전 관리·서버 측 일괄 작업을 담당합니다.
 
 | 계층 | 기술 |
@@ -81,7 +83,7 @@ npm run dev:frontend                       # http://localhost:5173 (/api 는 300
 ```
 
 프로덕션 빌드는 `npm run build` 한 번이면 되고, 백엔드가 `frontend/dist`를 정적 서빙합니다.
-프론트엔드만 정적 호스팅(GitHub Pages 등)해도 편집기는 동작합니다. 다른 주소의 API를 쓰려면 `VITE_API_BASE`를 지정하세요.
+프론트엔드만 정적 호스팅(GitHub Pages 등)해도 편집기는 동작합니다. `.github/workflows/pages.yml`이 푸시 때마다 데모를 GitHub Pages에 배포합니다(최초 1회 Settings → Pages → Source를 "GitHub Actions"로 설정). 다른 주소의 API를 쓰려면 `VITE_API_BASE`를 지정하세요.
 
 ### 테스트
 
