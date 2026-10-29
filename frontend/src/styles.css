@@ -433,7 +433,8 @@ body[data-tool='edit-text'] .textLayer span:hover {
 }
 
 .page .inline-text.editing {
-  border-style: solid;
+  /* The box spans the room available on the line, so its edge shows where text must end. */
+  border-style: dashed;
   resize: none;
   overflow: hidden;
   white-space: pre;

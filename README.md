@@ -17,7 +17,7 @@
 | 보기 | 연속 스크롤, 폭/쪽 맞춤·배율, 썸네일, 쪽 이동, 텍스트 선택·복사, 문서 내 검색 |
 | 쪽 편집 | 회전, 삭제, 복제, 빈 쪽 삽입, 썸네일 드래그로 순서 변경(다중 선택 지원) |
 | 문서 작업 | 병합, 분할(N쪽마다/범위), 쪽 추출, 워터마크, 쪽 번호, 문서 속성 |
-| 텍스트 수정 | 기존 텍스트를 클릭해 고치기 (원본 글자를 파일에서 지우고 같은 위치·색으로 새 글자 배치) |
+| 텍스트 수정 | 기존 텍스트를 클릭해 그 줄 구간을 고치기. 원본 글자를 파일에서 지우고 같은 기준선·색·글꼴(원본 글꼴에 글자가 있을 때)로 다시 쓰며, 넘치면 글자 폭을 줄여 맞춤 |
 | 영역 삭제 | 드래그한 영역의 글자를 파일에서 완전히 삭제(redaction)하고 검게 칠함 |
 | 주석 | 텍스트, 펜, 형광펜, 사각형, 가리기(흰색), 이미지/서명 |
 | 기타 | 실행 취소/다시 실행(30단계), 드래그&드롭 열기, 단축키, 다크 모드 |
@@ -86,7 +86,7 @@ npm run dev:frontend                       # http://localhost:5173 (/api 는 300
 ### 테스트
 
 ```bash
-npm test          # core 30개(삭제 엔진 14개 포함) + backend 3개
+npm test          # core 35개(삭제·텍스트 교체 19개 포함) + backend 3개
 ```
 
 ## REST API
@@ -125,7 +125,7 @@ curl -X POST localhost:3000/api/documents/<id>/operations \
   }'
 ```
 
-지원 작업: `rotate`, `delete`, `reorder`, `extract`, `duplicate`, `insertBlank`, `watermark`, `pageNumbers`, `addText`, `addImage`, `redact`, `metadata` — 타입 정의는 `packages/core/src/operations.ts` 참고.
+지원 작업: `rotate`, `delete`, `reorder`, `extract`, `duplicate`, `insertBlank`, `watermark`, `pageNumbers`, `addText`, `addImage`, `redact`, `replaceText`, `metadata` — 타입 정의는 `packages/core/src/operations.ts` 참고.
 
 ## 환경 변수 (`backend/.env.example`)
 
@@ -148,6 +148,7 @@ curl -X POST localhost:3000/api/documents/<id>/operations \
   * 스캔 이미지 속 글자(이미지는 검게 덮기만 함, 결과 메시지로 알림)
   * 글자를 도형(패스)으로 그린 PDF, 문서 속성·책갈피·첨부파일의 텍스트
   * 서버 문서함의 **이전 버전**: 원본이 그대로 보관되므로 민감 정보라면 문서를 새로 올리고 원본 문서를 삭제하세요.
-* 새로 쓰는 글자는 영문이면 Helvetica 실제 텍스트, 한글이면 이미지로 들어가 원래 글꼴과 다를 수 있습니다.
+* 텍스트 수정은 **원본 글꼴에 필요한 글자가 모두 있으면 그 글꼴을 그대로** 씁니다(문서에 이미 쓰인 숫자·이름 수정 등). 없는 글자가 있으면 영문은 비슷한 표준 글꼴(Times/Helvetica, 굵기 반영), 한글은 이미지로 넣습니다.
+* 한 줄 안에서 굵기·색이 섞인 구간을 고치면 한 가지 스타일로 합쳐집니다. 줄바꿈은 다시 하지 않으므로, 줄 공간을 넘치면 글자 폭을 최대 60%까지 줄이고 그래도 넘치면 경고합니다.
 * 파일 저장소는 로컬 디스크입니다. `StorageService`만 교체하면 S3 등으로 옮길 수 있습니다.
 * 인증/권한이 없습니다. 외부에 공개하려면 인증 계층을 먼저 추가하세요.

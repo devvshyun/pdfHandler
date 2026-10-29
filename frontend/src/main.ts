@@ -6,10 +6,9 @@ import {
   parsePageRanges,
   splitPdf,
   type PdfOperation,
-  type RedactionReport,
 } from '@pdfhandler/core';
 import type { PDFDocumentProxy } from 'pdfjs-dist';
-import { Annotator, readImageFile, type Tool } from './annotate';
+import { Annotator, readImageFile, type CommitReports, type Tool } from './annotate';
 import { api, type ServerDocumentDetail } from './api';
 import { rasterRotatedText } from './raster';
 import { buildSamplePdf } from './sample';
@@ -137,10 +136,13 @@ async function pushBytes(bytes: Uint8Array, label: string, keepPage = viewer.cur
   toast(label);
 }
 
-async function commit(ops: PdfOperation[], label: string, keepPage?: number): Promise<RedactionReport[]> {
-  const reports: RedactionReport[] = [];
+async function commit(ops: PdfOperation[], label: string, keepPage?: number): Promise<CommitReports> {
+  const reports: CommitReports = { redactions: [], replacements: [] };
   await busy(label, async () => {
-    const out = await applyOperations(current(), ops, { onRedaction: (r) => reports.push(r) });
+    const out = await applyOperations(current(), ops, {
+      onRedaction: (r) => reports.redactions.push(r),
+      onReplaceText: (r) => reports.replacements.push(r),
+    });
     await pushBytes(out, label, keepPage);
   });
   return reports;

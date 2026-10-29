@@ -33,7 +33,7 @@ export interface RedactionReport {
 /** `overlap`: any glyph touching the area goes. `center`: only glyphs whose centre lies inside. */
 export type HitMode = 'overlap' | 'center';
 
-type Matrix = [number, number, number, number, number, number];
+export type Matrix = [number, number, number, number, number, number];
 const IDENTITY: Matrix = [1, 0, 0, 1, 0, 0];
 
 const mul = (m: Matrix, n: Matrix): Matrix => [
@@ -69,11 +69,26 @@ interface TextState {
   Tfs: number;
   Trise: number;
   font?: FontMetrics;
+  fontRaw?: PDFObject;
 }
 
 interface GState {
   ctm: Matrix;
   ts: TextState;
+  /** DeviceRGB fill colour when known (g/rg/k); null after other colour spaces. */
+  fill: [number, number, number] | null;
+}
+
+/** Typography of the first removed glyph, so replacement text can be drawn the same way. */
+export interface CapturedRun {
+  /** Font dictionary (or a reference to it) the glyph was shown with. */
+  fontRaw: PDFObject;
+  /** Text rendering matrix of the glyph in page user space (includes size, scaling and rise). */
+  trm: Matrix;
+  /** Character and word spacing relative to the font size (Tc / Tfs, Tw / Tfs). */
+  charSpacing: number;
+  wordSpacing: number;
+  fill: [number, number, number] | null;
 }
 
 interface Ctx {
@@ -84,10 +99,17 @@ interface Ctx {
   fontCache: Map<PDFObject, FontMetrics | null>;
   /** Guards against Form XObjects that (directly or not) draw themselves. */
   formDepth: number;
+  capture?: CapturedRun;
 }
 
 /** Redacts `areas` (page user space) on one page. */
-export function redactPage(doc: PDFDocument, page: PDFPage, pageIndex: number, areas: Rect[], mode: HitMode): RedactionReport {
+export function redactPage(
+  doc: PDFDocument,
+  page: PDFPage,
+  pageIndex: number,
+  areas: Rect[],
+  mode: HitMode,
+): RedactionReport & { capture?: CapturedRun } {
   const report: RedactionReport = { page: pageIndex, removedGlyphs: 0, removedAnnotations: 0, imagesOverlapping: 0, approximateFonts: 0 };
   const ctx: Ctx = { doc, areas, mode, report, fontCache: new Map(), formDepth: 0 };
 
@@ -111,7 +133,7 @@ export function redactPage(doc: PDFDocument, page: PDFPage, pageIndex: number, a
     cached.contentStreamRef = undefined;
   }
   removeAnnotations(ctx, page);
-  return report;
+  return { ...report, capture: ctx.capture };
 }
 
 function pageContentBytes(page: PDFPage): Uint8Array {
@@ -149,7 +171,7 @@ function processStream(ctx: Ctx, data: Uint8Array, resources: PDFDict, baseCtm: 
   const untouchedUses = new Set<string>();
 
   const stack: GState[] = [];
-  let gs: GState = { ctm: baseCtm, ts: { Tc: 0, Tw: 0, Th: 1, TL: 0, Tfs: 0, Trise: 0 } };
+  let gs: GState = { ctm: baseCtm, ts: { Tc: 0, Tw: 0, Th: 1, TL: 0, Tfs: 0, Trise: 0 }, fill: [0, 0, 0] };
   let Tm: Matrix = IDENTITY;
   let Tlm: Matrix = IDENTITY;
 
@@ -186,6 +208,15 @@ function processStream(ctx: Ctx, data: Uint8Array, resources: PDFDict, baseCtm: 
           ctx.mode === 'center' ? contains(a, (box.x1 + box.x2) / 2, (box.y1 + box.y2) / 2) : overlaps(a, box),
         );
         if (hit && scaleX !== 0) {
+          if (!ctx.capture && ts.fontRaw) {
+            ctx.capture = {
+              fontRaw: ts.fontRaw,
+              trm,
+              charSpacing: ts.Tfs ? ts.Tc / ts.Tfs : 0,
+              wordSpacing: ts.Tfs ? ts.Tw / ts.Tfs : 0,
+              fill: gs.fill,
+            };
+          }
           if (kept.length) {
             flushNumber();
             out.push(Uint8Array.from(kept));
@@ -221,7 +252,21 @@ function processStream(ctx: Ctx, data: Uint8Array, resources: PDFDict, baseCtm: 
     const n = (i: number) => (typeof a[i] === 'number' ? (a[i] as number) : 0);
     switch (op.op) {
       case 'q':
-        stack.push({ ctm: gs.ctm, ts: { ...gs.ts } });
+        stack.push({ ctm: gs.ctm, ts: { ...gs.ts }, fill: gs.fill });
+        break;
+      case 'g':
+        gs.fill = [n(0), n(0), n(0)];
+        break;
+      case 'rg':
+        gs.fill = [n(0), n(1), n(2)];
+        break;
+      case 'k':
+        gs.fill = [(1 - n(0)) * (1 - n(3)), (1 - n(1)) * (1 - n(3)), (1 - n(2)) * (1 - n(3))];
+        break;
+      case 'cs':
+      case 'sc':
+      case 'scn':
+        gs.fill = null;
         break;
       case 'Q':
         gs = stack.pop() ?? gs;
@@ -252,6 +297,7 @@ function processStream(ctx: Ctx, data: Uint8Array, resources: PDFDict, baseCtm: 
         gs.ts.Tfs = n(1);
         const name = a[0] instanceof Name ? a[0].value : '';
         gs.ts.font = fonts ? fontMetrics(ctx, fonts, name) : undefined;
+        gs.ts.fontRaw = fonts?.get(PDFName.of(name));
         break;
       }
       case 'Td':

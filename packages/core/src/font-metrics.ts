@@ -246,3 +246,96 @@ function parseCMap(data: Uint8Array): CMap {
     },
   };
 }
+
+/** A shown-text element: a run of character codes, or a TJ displacement in thousandths of an em. */
+export type TextElement = Uint8Array | number;
+
+/**
+ * Builds an encoder that writes `text` in an existing font of the document, so edited text keeps the
+ * original typeface. Returns null for the whole string when any character is missing from the font
+ * (subset fonts only contain the glyphs the document used). A missing space becomes a TJ gap.
+ */
+export function makeEncoder(font: PDFDict): ((text: string) => TextElement[] | null) | null {
+  const map = new Map<string, Uint8Array>();
+  const toUnicode = lookup(font, 'ToUnicode');
+  if (toUnicode instanceof PDFStream) {
+    for (const [unicode, code] of parseToUnicode(streamBytes(toUnicode))) {
+      const prev = map.get(unicode);
+      if (!prev || code.length < prev.length) map.set(unicode, code);
+    }
+  }
+  const subtype = (lookup(font, 'Subtype') as PDFName | undefined)?.decodeText();
+  if (subtype !== 'Type0' && subtype !== 'Type3' && !map.size) {
+    // Simple font without ToUnicode: only safe when it uses a WinAnsi-compatible encoding.
+    const enc = lookup(font, 'Encoding');
+    const plain = !enc || (enc instanceof PDFName && enc.decodeText() === 'WinAnsiEncoding');
+    if (!plain) return null;
+    const widths = lookup(font, 'Widths');
+    const firstChar = num(lookup(font, 'FirstChar'), 0);
+    for (const cp of Encodings.WinAnsi.supportedCodePoints) {
+      const { code } = Encodings.WinAnsi.encodeUnicodeCodePoint(cp);
+      // With /Widths present a zero width means the glyph is not in the (subset) font.
+      if (widths instanceof PDFArray && !num(widths.lookup(code - firstChar) as PDFObject | undefined, 0)) continue;
+      map.set(String.fromCodePoint(cp), Uint8Array.of(code));
+    }
+  }
+  if (!map.size) return null;
+  return (text) => {
+    const out: TextElement[] = [];
+    let run: number[] = [];
+    const flush = () => {
+      if (run.length) out.push(Uint8Array.from(run));
+      run = [];
+    };
+    for (const ch of text) {
+      const code = map.get(ch);
+      if (code) run.push(...code);
+      else if (ch === ' ') {
+        flush();
+        out.push(-250); // a quarter-em gap stands in for a space glyph the subset lacks
+      } else return null;
+    }
+    flush();
+    return out;
+  };
+}
+
+/** ToUnicode CMap → [unicode string, character code bytes]. */
+function parseToUnicode(data: Uint8Array): Array<[string, Uint8Array]> {
+  const pairs: Array<[string, Uint8Array]> = [];
+  const utf16 = (b: Uint8Array) => {
+    let s = '';
+    for (let i = 0; i + 1 < b.length; i += 2) s += String.fromCharCode((b[i] << 8) | b[i + 1]);
+    return s;
+  };
+  const bump = (bytes: Uint8Array, by: number) => {
+    const out = Uint8Array.from(bytes);
+    let v = by;
+    for (let i = out.length - 1; i >= 0 && v; i--) {
+      const sum = out[i] + v;
+      out[i] = sum & 0xff;
+      v = sum >> 8;
+    }
+    return out;
+  };
+  for (const { op, args } of parseContent(data)) {
+    if (op === 'endbfchar') {
+      for (let i = 0; i + 1 < args.length; i += 2) {
+        const [src, dst] = [args[i], args[i + 1]];
+        if (src instanceof Str && dst instanceof Str) pairs.push([utf16(dst.bytes), src.bytes]);
+      }
+    } else if (op === 'endbfrange') {
+      for (let i = 0; i + 2 < args.length; i += 3) {
+        const [lo, hi, dst] = [args[i], args[i + 1], args[i + 2]];
+        if (!(lo instanceof Str && hi instanceof Str)) continue;
+        const count = hi.bytes.reduce((a, b) => a * 256 + b, 0) - lo.bytes.reduce((a, b) => a * 256 + b, 0);
+        for (let k = 0; k <= count && k < 65536; k++) {
+          const code = bump(lo.bytes, k);
+          if (dst instanceof Str) pairs.push([utf16(bump(dst.bytes, k)), code]);
+          else if (Array.isArray(dst) && dst[k] instanceof Str) pairs.push([utf16((dst[k] as Str).bytes), code]);
+        }
+      }
+    }
+  }
+  return pairs;
+}

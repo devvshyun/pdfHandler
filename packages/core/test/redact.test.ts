@@ -4,7 +4,7 @@ import { createRequire } from 'node:module';
 import { degrees, PDFDocument, PDFName, PDFRawStream, decodePDFRawStream, StandardFonts } from 'pdf-lib';
 import * as pdfjs from 'pdfjs-dist/legacy/build/pdf.mjs';
 import { describe, expect, it } from 'vitest';
-import { applyOperations, type PdfOperation, type RedactionReport } from '../src';
+import { applyOperations, type PdfOperation, type RedactionReport, type ReplaceTextReport } from '../src';
 
 const require = createRequire(import.meta.url);
 pdfjs.GlobalWorkerOptions.workerSrc = require.resolve('pdfjs-dist/legacy/build/pdf.worker.mjs');
@@ -280,6 +280,78 @@ describe('redact: combined with other operations', () => {
     const raw = await allStreamText(out);
     expect(raw).not.toContain('1,200');
     expect(raw).not.toContain('12345');
+  });
+});
+
+describe('replaceText', () => {
+  const TTF = '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf';
+  const PNG_1PX = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
+
+  async function replace(bytes: Uint8Array, op: Omit<Extract<PdfOperation, { type: 'replaceText' }>, 'type'>) {
+    const reports: ReplaceTextReport[] = [];
+    const out = await applyOperations(bytes, [{ type: 'replaceText', ...op }], { onReplaceText: (r) => reports.push(r) });
+    return { out, report: reports[0] };
+  }
+
+  it('reuses the original standard font on the same baseline', async () => {
+    const { bytes } = await helveticaPage([['Total due: 1,200 USD', 300]]);
+    const { out, report } = await replace(bytes, { page: 0, area: { x: 40, y: 82, width: 300, height: 22 }, text: 'Total due: 980 USD' });
+    expect(report).toMatchObject({ reusedFont: true, scale: 1, overflow: false });
+    const items = await textItems(out);
+    expect(items.map((i) => i.str).join('')).toBe('Total due: 980 USD');
+    expect(items.every((i) => Math.abs(i.y - 300) < 0.01)).toBe(true);
+    expect(await allStreamText(out)).not.toContain('1,200');
+  });
+
+  it.skipIf(!existsSync(TTF))('reuses an embedded subset font when it has the glyphs, else falls back', async () => {
+    const doc = await PDFDocument.create();
+    doc.registerFontkit(fontkit);
+    const font = await doc.embedFont(readFileSync(TTF), { subset: true });
+    doc.addPage([600, 400]).drawText('Привет секретный мир', { x: 50, y: 300, size: 20, font });
+    const bytes = await doc.save();
+    const x = 50 + font.widthOfTextAtSize('Привет ', 20);
+    const area = { x, y: 82, width: font.widthOfTextAtSize('секретный', 20), height: 22 };
+
+    const same = await replace(bytes, { page: 0, area, text: 'мир' });
+    expect(same.report.reusedFont).toBe(true);
+    expect(await textOf(same.out)).toMatch(/Привет\s*мир\s*мир/);
+
+    const latin = await replace(bytes, { page: 0, area, text: 'Zebra' });
+    expect(latin.report.reusedFont).toBe(false);
+    expect(await textOf(latin.out)).toContain('Zebra');
+    expect(await textOf(latin.out)).not.toContain('секрет');
+  });
+
+  it('narrows text to the available width and flags overflow', async () => {
+    const { bytes } = await helveticaPage([['Short', 300]]);
+    const area = { x: 40, y: 82, width: 80, height: 22 };
+    const fit = await replace(bytes, { page: 0, area, text: 'Shortened', maxWidth: 80 });
+    expect(fit.report.scale).toBeLessThan(1);
+    expect(fit.report.scale).toBeGreaterThanOrEqual(0.6);
+    expect(fit.report.overflow).toBe(false);
+    const items = await textItems(fit.out);
+    const right = Math.max(...items.map((i) => i.x + i.width));
+    expect(right).toBeLessThanOrEqual(40 + 80 + 0.5);
+
+    const over = await replace(bytes, { page: 0, area, text: 'A much much longer replacement', maxWidth: 80 });
+    expect(over.report).toMatchObject({ scale: 0.6, overflow: true });
+  });
+
+  it('needs a fallback image for scripts the standard font cannot show', async () => {
+    const { bytes } = await helveticaPage([['Name: John', 300]]);
+    const area = { x: 40, y: 82, width: 200, height: 22 };
+    await expect(replace(bytes, { page: 0, area, text: '이름: 홍길동' })).rejects.toThrow(/fallbackImage/);
+    const ok = await replace(bytes, { page: 0, area, text: '이름: 홍길동', fallbackImage: { imageBase64: PNG_1PX, width: 90, height: 20 } });
+    expect(ok.report.reusedFont).toBe(false);
+    expect(await textOf(ok.out)).not.toContain('John');
+  });
+
+  it('covers the area when no original glyph is found', async () => {
+    const { bytes } = await helveticaPage([['Text', 300]]);
+    const { out, report } = await replace(bytes, { page: 0, area: { x: 300, y: 300, width: 50, height: 20 }, text: 'New', coverColor: { r: 1, g: 1, b: 0 } });
+    expect(report.removedGlyphs).toBe(0);
+    expect(await allStreamText(out)).toMatch(/1 1 0 rg[\s\S]*\d l\n/);
+    expect(await textOf(out)).toContain('New');
   });
 });
 

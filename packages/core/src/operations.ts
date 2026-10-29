@@ -71,6 +71,26 @@ export type PdfOperation =
       coverIfUntouched?: RgbColor;
     }
   | {
+      /**
+       * Replaces the text inside `area` (visual, top-left origin) with `text`: the old glyphs are
+       * removed from the content and the new text is drawn at the same baseline, in the original
+       * font when it contains every character, otherwise in Helvetica (Latin) or `fallbackImage`.
+       * Text wider than `maxWidth` is narrowed (down to 60%) to fit.
+       */
+      type: 'replaceText';
+      page: number;
+      area: { x: number; y: number; width: number; height: number };
+      text: string;
+      /** Width available for the new text, in points from the area's left edge. */
+      maxWidth?: number;
+      /** Ink colour to use when the original colour cannot be read. */
+      textColor?: RgbColor;
+      /** Painted over the area when no original glyph was found (e.g. text inside an image). */
+      coverColor?: RgbColor;
+      /** Rendered text for scripts the standard font cannot show and the original font lacks. */
+      fallbackImage?: { imageBase64: string; width: number; height: number };
+    }
+  | {
       type: 'metadata';
       title?: string;
       author?: string;
@@ -92,6 +112,7 @@ export const OPERATION_TYPES: readonly PdfOperationType[] = [
   'addText',
   'addImage',
   'redact',
+  'replaceText',
   'metadata',
 ] as const;
 

@@ -1,22 +1,44 @@
 import {
   degrees,
   EncryptedPDFError,
+  PDFArray,
+  PDFDict,
   PDFDocument,
   PDFFont,
+  PDFName,
+  PDFNumber,
   PDFPage,
+  PDFRef,
   rgb,
   StandardFonts,
 } from 'pdf-lib';
 import { base64ToBytes } from './base64';
 import { PdfOperation, PdfOperationError, RgbColor } from './operations';
-import { collectGarbage, RedactionReport, redactPage } from './redact';
+import { makeEncoder, loadFontMetrics, TextElement } from './font-metrics';
+import { formatNumber, hexString } from './content-lexer';
+import { CapturedRun, collectGarbage, Matrix, RedactionReport, redactPage } from './redact';
 
 export interface ApplyOptions {
   /** TTF/OTF bytes used for text operations. Needed for non-Latin text (e.g. Korean). */
   font?: Uint8Array;
   /** Receives what each `redact` operation removed (and what it could not). */
   onRedaction?: (report: RedactionReport) => void;
+  /** Receives how each `replaceText` operation was carried out. */
+  onReplaceText?: (report: ReplaceTextReport) => void;
 }
+
+export interface ReplaceTextReport {
+  page: number;
+  removedGlyphs: number;
+  /** The new text uses the document's own font for that run. */
+  reusedFont: boolean;
+  /** Horizontal scale applied to fit `maxWidth` (1 = none). */
+  scale: number;
+  /** Still wider than `maxWidth` even at the narrowest allowed scale. */
+  overflow: boolean;
+}
+
+const MIN_FIT_SCALE = 0.6;
 
 export interface PdfPageInfo {
   width: number;
@@ -88,7 +110,7 @@ export async function applyOperations(
     doc = await applyOne(doc, op, fonts, options);
   }
   // Redaction must not leave the replaced streams behind as unreferenced objects.
-  if (operations.some((op) => op.type === 'redact')) collectGarbage(doc);
+  if (operations.some((op) => op.type === 'redact' || op.type === 'replaceText')) collectGarbage(doc);
 
   doc.setProducer(PRODUCER);
   doc.setModificationDate(new Date());
@@ -306,6 +328,65 @@ async function applyOne(doc: PDFDocument, op: PdfOperation, fonts: FontCache, op
       options.onRedaction?.(report);
       return doc;
     }
+    case 'replaceText': {
+      assertPages([op.page], count);
+      const a = op.area;
+      if (![a.x, a.y, a.width, a.height].every(Number.isFinite) || a.width <= 0 || a.height <= 0) {
+        throw new PdfOperationError('replaceText 영역의 좌표가 올바르지 않습니다.');
+      }
+      const page = doc.getPage(op.page);
+      const v = visualSize(page);
+      const p1 = visualToUser(page, a.x, v.height - a.y);
+      const p2 = visualToUser(page, a.x + a.width, v.height - a.y - a.height);
+      const area = { x1: Math.min(p1.x, p2.x), y1: Math.min(p1.y, p2.y), x2: Math.max(p1.x, p2.x), y2: Math.max(p1.y, p2.y) };
+      const result = redactPage(doc, page, op.page, [area], 'center');
+      const report: ReplaceTextReport = { page: op.page, removedGlyphs: result.removedGlyphs, reusedFont: false, scale: 1, overflow: false };
+
+      if (result.removedGlyphs === 0 && op.coverColor) {
+        page.drawRectangle({ x: area.x1, y: area.y1, width: area.x2 - area.x1, height: area.y2 - area.y1, color: toRgb(op.coverColor) });
+      }
+      // maxWidth counts from the area's left edge; the new text starts where the old run did.
+      const startOffset = result.capture ? userToVisual(page, { x: result.capture.trm[4], y: result.capture.trm[5] }).x - a.x : 0;
+      const maxWidth = (op.maxWidth ?? Infinity) - Math.max(0, startOffset);
+      const text = op.text.replace(/\s+$/, '');
+      if (text) {
+        const color = result.capture?.fill ?? (op.textColor ? [op.textColor.r, op.textColor.g, op.textColor.b] : [0, 0, 0]);
+        const drawn = result.capture ? drawInOriginalFont(doc, page, result.capture, text, maxWidth, color, report) : false;
+        if (!drawn) {
+          // Baseline and size from the removed run when known, else estimated from the area.
+          const rot = pageRotation(page);
+          const size = result.capture ? Math.hypot(result.capture.trm[2], result.capture.trm[3]) : a.height * 0.8;
+          const origin = result.capture
+            ? { x: result.capture.trm[4], y: result.capture.trm[5] }
+            : visualToUser(page, a.x, v.height - a.y - a.height * 0.8);
+          if (/^[\x20-\x7e]*$/.test(text)) {
+            const font = await fonts.get(doc, standardLookalike(doc, result.capture));
+            const natural = font.widthOfTextAtSize(text, size);
+            fitScale(report, natural, maxWidth);
+            const rad = (rot * Math.PI) / 180;
+            const trm: Matrix = [size * Math.cos(rad), size * Math.sin(rad), -size * Math.sin(rad), size * Math.cos(rad), origin.x, origin.y];
+            const fontName = page.node.newFontDictionary('RpH', font.ref);
+            appendText(doc, page, fontName.decodeText(), [Uint8Array.from(font.encodeText(text).asBytes())], trm, report.scale, color, 0, 0);
+          } else if (op.fallbackImage) {
+            const img = op.fallbackImage;
+            fitScale(report, img.width, maxWidth);
+            // The raster's line box puts the baseline ~0.8 of the height down.
+            const top = result.capture ? v.height - userToVisual(page, origin).y - img.height * 0.78 : a.y + (a.height - img.height) / 2;
+            const left = result.capture ? userToVisual(page, origin).x : a.x;
+            doc = await applyOne(
+              doc,
+              { type: 'addImage', page: op.page, x: left, y: top, width: img.width * report.scale, height: img.height, imageBase64: img.imageBase64 },
+              fonts,
+              options,
+            );
+          } else {
+            throw new PdfOperationError('기본 PDF 폰트로는 이 글자를 쓸 수 없습니다. fallbackImage를 함께 보내세요.');
+          }
+        }
+      }
+      options.onReplaceText?.(report);
+      return doc;
+    }
     case 'metadata': {
       if (op.title !== undefined) doc.setTitle(op.title);
       if (op.author !== undefined) doc.setAuthor(op.author);
@@ -317,6 +398,113 @@ async function applyOne(doc: PDFDocument, op: PdfOperation, fonts: FontCache, op
       const unknown = op as { type?: string };
       throw new PdfOperationError(`알 수 없는 작업: ${unknown.type}`);
     }
+  }
+}
+
+/** Draws `text` with the font of the removed run; false when that font lacks a character. */
+function drawInOriginalFont(
+  doc: PDFDocument,
+  page: PDFPage,
+  run: CapturedRun,
+  text: string,
+  maxWidth: number,
+  color: number[],
+  report: ReplaceTextReport,
+): boolean {
+  const fontDict = run.fontRaw instanceof PDFRef ? doc.context.lookup(run.fontRaw) : run.fontRaw;
+  if (!(fontDict instanceof PDFDict)) return false;
+  const encode = makeEncoder(fontDict);
+  const elements = encode?.(text);
+  if (!elements) return false;
+  const metrics = loadFontMetrics(fontDict);
+  // Width in text space (font size 1), then in user space through the run's matrix.
+  let width = 0;
+  for (const el of elements) {
+    if (typeof el === 'number') width -= el / 1000;
+    else
+      for (const { code, start, end } of metrics.codes(el)) {
+        width += metrics.width(code) + run.charSpacing + (metrics.isSpace(code, end - start) ? run.wordSpacing : 0);
+      }
+  }
+  fitScale(report, width * Math.hypot(run.trm[0], run.trm[1]), maxWidth);
+  const ref = run.fontRaw instanceof PDFRef ? run.fontRaw : doc.context.register(fontDict);
+  // A fresh resource name: the run may have come from a Form XObject with its own font names.
+  const name = page.node.newFontDictionary('RpF', ref).decodeText();
+  appendText(doc, page, name, elements, run.trm, report.scale, color, run.charSpacing, run.wordSpacing);
+  report.reusedFont = true;
+  return true;
+}
+
+/** Times or Helvetica (bold or not), whichever resembles the removed run's font. */
+function standardLookalike(doc: PDFDocument, run: CapturedRun | undefined): StandardFonts {
+  let serif = false;
+  let bold = false;
+  const font = run && (run.fontRaw instanceof PDFRef ? doc.context.lookup(run.fontRaw) : run.fontRaw);
+  if (font instanceof PDFDict) {
+    let dict = font;
+    const descendants = font.lookup(PDFName.of('DescendantFonts'));
+    if (descendants instanceof PDFArray && descendants.lookup(0) instanceof PDFDict) dict = descendants.lookup(0) as PDFDict;
+    const name = (dict.lookup(PDFName.of('BaseFont')) as PDFName | undefined)?.decodeText() ?? '';
+    const descriptor = dict.lookup(PDFName.of('FontDescriptor'));
+    const flags = descriptor instanceof PDFDict ? ((descriptor.lookup(PDFName.of('Flags')) as PDFNumber | undefined)?.asNumber() ?? 0) : 0;
+    const weight = descriptor instanceof PDFDict ? ((descriptor.lookup(PDFName.of('FontWeight')) as PDFNumber | undefined)?.asNumber() ?? 0) : 0;
+    serif = (flags & 2) !== 0 || /times|serif|roman|georgia|garamond|myeongjo|myungjo|batang/i.test(name.replace(/sans/i, ''));
+    bold = weight >= 600 || /bold|black|heavy|semibold/i.test(name);
+  }
+  if (serif) return bold ? StandardFonts.TimesRomanBold : StandardFonts.TimesRoman;
+  return bold ? StandardFonts.HelveticaBold : StandardFonts.Helvetica;
+}
+
+function fitScale(report: ReplaceTextReport, naturalWidth: number, maxWidth: number): void {
+  if (!(naturalWidth > maxWidth)) return;
+  const needed = maxWidth / naturalWidth;
+  report.scale = Math.max(MIN_FIT_SCALE, needed);
+  report.overflow = needed < MIN_FIT_SCALE;
+}
+
+/** Appends `BT … TJ ET` with font size 1 and the run's rendering matrix as the text matrix. */
+function appendText(
+  doc: PDFDocument,
+  page: PDFPage,
+  fontName: string,
+  elements: TextElement[],
+  trm: Matrix,
+  scale: number,
+  color: number[],
+  charSpacing: number,
+  wordSpacing: number,
+): void {
+  const f = formatNumber;
+  const body = elements.map((e) => (typeof e === 'number' ? f(e) : hexString(e))).join(' ');
+  const ops = [
+    'q',
+    'BT',
+    `${color.map((c) => f(Math.min(1, Math.max(0, c)))).join(' ')} rg`,
+    `/${fontName} 1 Tf`,
+    `${f(charSpacing)} Tc ${f(wordSpacing)} Tw ${f(scale * 100)} Tz`,
+    `${trm.map(f).join(' ')} Tm`,
+    `[${body}] TJ`,
+    'ET',
+    'Q',
+  ].join('\n');
+  const ref = doc.context.register(doc.context.flateStream(ops));
+  page.node.addContentStream(ref);
+}
+
+/** Inverse of visualToUser: page user space → visual coordinates (bottom-left origin). */
+function userToVisual(page: PDFPage, p: { x: number; y: number }): { x: number; y: number } {
+  const box = page.getCropBox();
+  const x = p.x - box.x;
+  const y = p.y - box.y;
+  switch (pageRotation(page)) {
+    case 90:
+      return { x: y, y: box.width - x };
+    case 180:
+      return { x: box.width - x, y: box.height - y };
+    case 270:
+      return { x: box.height - y, y: x };
+    default:
+      return { x, y };
   }
 }
 

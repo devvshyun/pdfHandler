@@ -1,8 +1,13 @@
 // Annotation tools. Everything is flattened into the PDF as images via the `addImage` operation,
 // so the result looks identical in every viewer and supports any language.
-import { bytesToBase64, type PdfOperation, type RedactionReport } from '@pdfhandler/core';
+import { bytesToBase64, type PdfOperation, type RedactionReport, type ReplaceTextReport } from '@pdfhandler/core';
 import { rasterShape, rasterStroke, rasterText, type ShapeKind, type Stroke } from './raster';
 import type { Viewer } from './viewer';
+
+export interface CommitReports {
+  redactions: RedactionReport[];
+  replacements: ReplaceTextReport[];
+}
 
 export type Tool = 'select' | 'edit-text' | 'redact' | 'text' | 'pen' | 'highlight' | 'rect' | 'whiteout' | 'image';
 
@@ -11,8 +16,8 @@ export interface AnnotatorHost {
   tool(): Tool;
   color(): string;
   size(): number;
-  /** Applies the operations; resolves with what any `redact` operation removed. */
-  commit(ops: PdfOperation[], label: string): Promise<RedactionReport[]>;
+  /** Applies the operations; resolves with what the redact / replaceText operations did. */
+  commit(ops: PdfOperation[], label: string): Promise<CommitReports>;
   pickImage(): Promise<{ base64: string; width: number; height: number } | null>;
   resetTool(): void;
   toast(message: string): void;
@@ -99,9 +104,10 @@ export class Annotator {
   }
 
   /**
-   * Replaces a run of existing text: its glyphs are removed from the page content (`redact`) and the
-   * new text is drawn in the same place in the sampled ink colour. If the run cannot be found in the
-   * content (e.g. it is part of an image) the area is covered in the sampled background colour instead.
+   * Edits the line segment around the clicked text: neighbouring text-layer runs on the same line
+   * (not across wide gaps such as table columns) are edited together. The old glyphs are removed
+   * from the content and the new text is drawn on the same baseline, in the document's own font
+   * when it has the characters, and narrowed to fit the space before the next text on the line.
    */
   private startEditText(index: number, span: HTMLElement): void {
     if (document.querySelector('.inline-text')) return;
@@ -111,27 +117,21 @@ export class Annotator {
     }
     const { viewer } = this.host;
     const pageEl = viewer.pageElement(index)!;
-    const pageRect = pageEl.getBoundingClientRect();
-    const r = span.getBoundingClientRect();
-    const box = {
-      x: (r.left - pageRect.left) / viewer.scale,
-      y: (r.top - pageRect.top) / viewer.scale,
-      width: r.width / viewer.scale,
-      height: r.height / viewer.scale,
-    };
-    const fontSize = parseFloat(getComputedStyle(span).fontSize) / viewer.scale || box.height;
-    const serif = /(^|[^-])serif/i.test(getComputedStyle(span).fontFamily) && !/sans/i.test(getComputedStyle(span).fontFamily);
-    const colors = sampleColors(pageEl.querySelector<HTMLCanvasElement>('canvas.render')!, pageEl, r);
-    const original = span.textContent ?? '';
+    const segment = lineSegment(pageEl, span, viewer.scale);
+    const { box, fontSize, maxWidth, original, spans } = segment;
+    const family = getComputedStyle(span).fontFamily;
+    const serif = /(^|[^-])serif/i.test(family) && !/sans/i.test(family);
+    const colors = sampleColors(pageEl.querySelector<HTMLCanvasElement>('canvas.render')!, pageEl, spans);
 
     const input = document.createElement('textarea');
     input.className = 'inline-text editing';
     input.value = original;
     input.rows = 1;
+    input.title = '점선 상자까지가 이 줄에서 쓸 수 있는 공간입니다';
     Object.assign(input.style, {
       left: `${box.x * viewer.scale - 2}px`,
       top: `${box.y * viewer.scale - 2}px`,
-      width: `${Math.max(box.width * viewer.scale + 24, 80)}px`,
+      width: `${Math.max(maxWidth * viewer.scale + 4, 60)}px`,
       fontSize: `${fontSize * viewer.scale}px`,
       color: colors.fg,
       background: colors.bg,
@@ -149,32 +149,28 @@ export class Annotator {
       input.remove();
       if (!save || text === original) return;
       const pad = Math.max(1, fontSize * 0.08);
-      const ops: PdfOperation[] = [
-        {
-          type: 'redact',
-          page: index,
-          areas: [{ x: box.x - pad, y: box.y - pad, width: box.width + pad * 2, height: box.height + pad * 2 }],
-          // Only glyphs centred in the run: neighbours that the box grazes stay.
-          mode: 'center',
-          fill: null,
-          coverIfUntouched: hexToRgb(colors.bg),
-        },
-      ];
-      if (text) {
-        if (/^[\x20-\x7e\n]*$/.test(text) && !serif) {
-          // Latin text goes in as real text (selectable and searchable) in Helvetica.
-          // addText takes the top of the text box; Helvetica's ascent is ~0.72 of the size.
-          ops.push({ type: 'addText', page: index, x: box.x, y: box.y + box.height * 0.82 - fontSize, text, fontSize, color: hexToRgb(colors.fg) });
-        } else {
-          const img = await rasterText(text, fontSize, colors.fg, false, serif);
-          // rasterText centres glyphs in a 1.25em line box.
-          ops.push({ type: 'addImage', page: index, x: box.x - 1, y: box.y - fontSize * 0.125 - (box.height - fontSize) / 2, width: img.width, height: img.height, imageBase64: img.base64 });
-        }
+      const op: PdfOperation = {
+        type: 'replaceText',
+        page: index,
+        area: { x: box.x - pad, y: box.y - pad, width: box.width + pad * 2, height: box.height + pad * 2 },
+        text,
+        maxWidth: maxWidth + pad,
+        textColor: hexToRgb(colors.fg),
+        coverColor: hexToRgb(colors.bg),
+      };
+      if (text && !/^[\x20-\x7e]*$/.test(text)) {
+        const img = await rasterText(text, fontSize, colors.fg, false, serif);
+        op.fallbackImage = { imageBase64: img.base64, width: img.width, height: img.height };
       }
-      const [report] = await this.host.commit(ops, text ? '텍스트 수정' : '텍스트 삭제');
-      if (report && report.removedGlyphs === 0) {
-        this.host.toast('원본 글자를 찾지 못해 배경색으로 덮었습니다(이미지 속 글자일 수 있습니다).');
-      }
+      const { replacements } = await this.host.commit([op], text ? '텍스트 수정' : '텍스트 삭제');
+      const r = replacements[0];
+      if (!r) return;
+      const notes: string[] = [];
+      if (r.removedGlyphs === 0) notes.push('원본 글자를 찾지 못해 배경색으로 덮었습니다(이미지 속 글자일 수 있음)');
+      if (text && !r.reusedFont) notes.push('원본 글꼴에 없는 글자가 있어 다른 글꼴로 넣었습니다');
+      if (r.overflow) notes.push('줄 공간을 넘칩니다. 내용을 줄이거나 나눠서 고치세요');
+      else if (r.scale < 1) notes.push(`공간에 맞추려고 글자 폭을 ${Math.round(r.scale * 100)}%로 줄였습니다`);
+      if (notes.length) (r.overflow ? this.host.toast : this.host.notify)(notes.join(' · '));
     };
     input.addEventListener('blur', () => void finish(true));
     input.addEventListener('keydown', (k) => {
@@ -271,7 +267,9 @@ export class Annotator {
       const height = Math.abs(end.y - start.y);
       if (width < 3 || height < 3) return box.remove();
       if (kind === 'redact') {
-        const [report] = await this.host.commit([{ type: 'redact', page: index, areas: [{ x, y, width, height }] }], '영역 삭제');
+        const {
+          redactions: [report],
+        } = await this.host.commit([{ type: 'redact', page: index, areas: [{ x, y, width, height }] }], '영역 삭제');
         box.remove();
         if (report) this.host.notify(describeRedaction(report));
         return;
@@ -322,6 +320,66 @@ export class Annotator {
   }
 }
 
+interface Segment {
+  spans: HTMLElement[];
+  /** Union of the spans, PDF points, visual top-left origin. */
+  box: { x: number; y: number; width: number; height: number };
+  fontSize: number;
+  /** Room from box.x up to the next text on the line (or the right margin). */
+  maxWidth: number;
+  original: string;
+}
+
+/** The clicked run plus its neighbours on the same line, stopping at column-sized gaps. */
+function lineSegment(pageEl: HTMLElement, clicked: HTMLElement, scale: number): Segment {
+  const pageRect = pageEl.getBoundingClientRect();
+  const toPt = (el: HTMLElement) => {
+    const r = el.getBoundingClientRect();
+    return { el, x: (r.left - pageRect.left) / scale, y: (r.top - pageRect.top) / scale, w: r.width / scale, h: r.height / scale };
+  };
+  const all = [...pageEl.querySelectorAll<HTMLElement>('.textLayer span')]
+    .filter((el) => el.textContent && !/rotate/.test(el.style.transform))
+    .map(toPt);
+  const me = toPt(clicked);
+  const fontSize = parseFloat(getComputedStyle(clicked).fontSize) / scale || me.h;
+  const midY = me.y + me.h / 2;
+  const line = all
+    .filter((o) => Math.abs(o.y + o.h / 2 - midY) < me.h * 0.35 && Math.abs(o.h - me.h) < me.h * 0.5)
+    .sort((a, b) => a.x - b.x);
+  const gapLimit = fontSize * 1.2;
+  let lo = line.findIndex((o) => o.el === clicked);
+  let hi = lo;
+  while (lo > 0 && line[lo].x - (line[lo - 1].x + line[lo - 1].w) < gapLimit) lo--;
+  while (hi < line.length - 1 && line[hi + 1].x - (line[hi].x + line[hi].w) < gapLimit) hi++;
+  const group = line.slice(lo, hi + 1);
+
+  let original = '';
+  group.forEach((o, i) => {
+    const t = o.el.textContent ?? '';
+    if (i > 0) {
+      const prev = group[i - 1];
+      const gap = o.x - (prev.x + prev.w);
+      if (gap > fontSize * 0.15 && !/\s$/.test(original) && !/^\s/.test(t)) original += ' ';
+    }
+    original += t;
+  });
+  const x = group[0].x;
+  const right = Math.max(...group.map((o) => o.x + o.w));
+  const top = Math.min(...group.map((o) => o.y));
+  const bottom = Math.max(...group.map((o) => o.y + o.h));
+  const next = line[hi + 1];
+  const pageWidth = pageRect.width / scale;
+  const leftMargin = Math.min(...all.map((o) => o.x));
+  const limit = next ? next.x - fontSize * 0.3 : Math.max(right, pageWidth - leftMargin);
+  return {
+    spans: group.map((o) => o.el),
+    box: { x, y: top, width: right - x, height: bottom - top },
+    fontSize,
+    maxWidth: Math.max(right, limit) - x,
+    original: original.trim(),
+  };
+}
+
 function describeRedaction(r: RedactionReport): string {
   const parts = [r.removedGlyphs ? `글자 ${r.removedGlyphs}개를 파일에서 삭제` : '삭제할 글자 없음'];
   if (r.removedAnnotations) parts.push(`주석·입력란 ${r.removedAnnotations}개 삭제`);
@@ -331,8 +389,15 @@ function describeRedaction(r: RedactionReport): string {
 }
 
 /** Picks the background (most common edge colour) and ink (furthest from it) under a text run. */
-function sampleColors(canvas: HTMLCanvasElement, pageEl: HTMLElement, r: DOMRect): { fg: string; bg: string } {
+function sampleColors(canvas: HTMLCanvasElement, pageEl: HTMLElement, spans: HTMLElement[]): { fg: string; bg: string } {
   const fallback = { fg: '#000000', bg: '#ffffff' };
+  const rects = spans.map((sp) => sp.getBoundingClientRect());
+  const r = {
+    left: Math.min(...rects.map((x) => x.left)),
+    top: Math.min(...rects.map((x) => x.top)),
+    width: Math.max(...rects.map((x) => x.right)) - Math.min(...rects.map((x) => x.left)),
+    height: Math.max(...rects.map((x) => x.bottom)) - Math.min(...rects.map((x) => x.top)),
+  };
   const pageRect = pageEl.getBoundingClientRect();
   const k = canvas.width / pageRect.width;
   const x = Math.max(0, Math.floor((r.left - pageRect.left) * k));
