@@ -17,6 +17,8 @@ import { PdfOperation, PdfOperationError, RgbColor } from './operations';
 import { makeEncoder, loadFontMetrics, TextElement } from './font-metrics';
 import { formatNumber, hexString } from './content-lexer';
 import { CapturedRun, collectGarbage, Matrix, RedactionReport, redactPage } from './redact';
+import { ImageCodec, runImageJobs } from './image-redact';
+import { sanitizeDocument, SanitizeReport } from './sanitize';
 
 export interface ApplyOptions {
   /** TTF/OTF bytes used for text operations. Needed for non-Latin text (e.g. Korean). */
@@ -25,6 +27,14 @@ export interface ApplyOptions {
   onRedaction?: (report: RedactionReport) => void;
   /** Receives how each `replaceText` operation was carried out. */
   onReplaceText?: (report: ReplaceTextReport) => void;
+  /** Receives what each `sanitize` operation removed. */
+  onSanitize?: (report: SanitizeReport) => void;
+  /**
+   * Decoder/encoder for image formats the core cannot handle itself, used to redact image
+   * pixels. Without it, JPEG (DCTDecode) images under a redaction area are only covered and
+   * reported in `imagesUnredacted`. Flate/LZW/uncompressed images never need it.
+   */
+  imageCodec?: ImageCodec;
 }
 
 export interface ReplaceTextReport {
@@ -110,7 +120,7 @@ export async function applyOperations(
     doc = await applyOne(doc, op, fonts, options);
   }
   // Redaction must not leave the replaced streams behind as unreferenced objects.
-  if (operations.some((op) => op.type === 'redact' || op.type === 'replaceText')) collectGarbage(doc);
+  if (operations.some((op) => op.type === 'redact' || op.type === 'replaceText' || op.type === 'sanitize')) collectGarbage(doc);
 
   doc.setProducer(PRODUCER);
   doc.setModificationDate(new Date());
@@ -317,8 +327,20 @@ async function applyOne(doc: PDFDocument, op: PdfOperation, fonts: FontCache, op
         const p2 = visualToUser(page, a.x + a.width, v.height - a.y - a.height);
         return { x1: Math.min(p1.x, p2.x), y1: Math.min(p1.y, p2.y), x2: Math.max(p1.x, p2.x), y2: Math.max(p1.y, p2.y) };
       });
-      const report = redactPage(doc, page, op.page, areas, op.mode ?? 'overlap');
       const fill = op.fill === undefined ? { r: 0, g: 0, b: 0 } : op.fill;
+      const { capture: _capture, imageJobs, ...report } = redactPage(doc, page, op.page, areas, op.mode ?? 'overlap', {
+        sanitize: op.sanitize ?? true,
+        images: { codec: options.imageCodec },
+      });
+      // Redacted pixels take the box colour; with no box (fill: null) black, since the point is
+      // that the original pixels are gone, not how the area looks.
+      const pixels = fill ?? { r: 0, g: 0, b: 0 };
+      const redacted = await runImageJobs(doc, imageJobs, options.imageCodec, [pixels.r, pixels.g, pixels.b].map((c) => Math.min(1, Math.max(0, c))) as [number, number, number]);
+      report.imagesRedacted += redacted;
+      if (redacted < imageJobs.length) {
+        report.imagesUnredacted += imageJobs.length - redacted;
+        if (!report.unredactedImageReasons.includes('decode')) report.unredactedImageReasons.push('decode');
+      }
       const paint = fill ?? (report.removedGlyphs === 0 ? op.coverIfUntouched : undefined);
       if (paint) {
         for (const a of areas) {
@@ -339,7 +361,8 @@ async function applyOne(doc: PDFDocument, op: PdfOperation, fonts: FontCache, op
       const p1 = visualToUser(page, a.x, v.height - a.y);
       const p2 = visualToUser(page, a.x + a.width, v.height - a.y - a.height);
       const area = { x1: Math.min(p1.x, p2.x), y1: Math.min(p1.y, p2.y), x2: Math.max(p1.x, p2.x), y2: Math.max(p1.y, p2.y) };
-      const result = redactPage(doc, page, op.page, [area], 'center');
+      // An edit only replaces text: links and form fields over the line stay.
+      const result = redactPage(doc, page, op.page, [area], 'center', { removeAnnotations: false, sanitize: op.sanitize ?? false });
       const report: ReplaceTextReport = { page: op.page, removedGlyphs: result.removedGlyphs, reusedFont: false, scale: 1, overflow: false };
 
       if (result.removedGlyphs === 0 && op.coverColor) {
@@ -385,6 +408,11 @@ async function applyOne(doc: PDFDocument, op: PdfOperation, fonts: FontCache, op
         }
       }
       options.onReplaceText?.(report);
+      return doc;
+    }
+    case 'sanitize': {
+      const report = sanitizeDocument(doc, op);
+      options.onSanitize?.(report);
       return doc;
     }
     case 'metadata': {

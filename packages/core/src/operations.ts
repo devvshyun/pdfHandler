@@ -69,6 +69,12 @@ export type PdfOperation =
       fill?: RgbColor | null;
       /** Painted only when no glyph was found to remove (e.g. text that is part of an image). */
       coverIfUntouched?: RgbColor;
+      /**
+       * Also remove hidden text tied to the removed content: /ActualText, /Alt and /E of the
+       * marked content and structure elements that contained it, and the page thumbnail.
+       * Default true.
+       */
+      sanitize?: boolean;
     }
   | {
       /**
@@ -89,6 +95,25 @@ export type PdfOperation =
       coverColor?: RgbColor;
       /** Rendered text for scripts the standard font cannot show and the original font lacks. */
       fallbackImage?: { imageBase64: string; width: number; height: number };
+      /** Remove /ActualText, /Alt, /E tied to the replaced text (see redact). Default false. */
+      sanitize?: boolean;
+    }
+  | {
+      /**
+       * Removes document-level hidden information. Every flag defaults to true; pass false to
+       * keep that part. Page content is not touched (use redact for that).
+       */
+      type: 'sanitize';
+      /** Document information dictionary (title, author, producer, dates, custom keys). */
+      removeMetadata?: boolean;
+      /** XMP metadata streams (catalog /Metadata and those attached to other objects). */
+      removeXmp?: boolean;
+      /** Document JavaScript, JavaScript open actions and additional actions (/AA). */
+      removeJavaScript?: boolean;
+      /** Embedded files (/EmbeddedFiles, file attachment annotations, /AF, portfolios). */
+      removeEmbeddedFiles?: boolean;
+      /** Bookmarks (/Outlines). */
+      removeOutlines?: boolean;
     }
   | {
       type: 'metadata';
@@ -113,6 +138,7 @@ export const OPERATION_TYPES: readonly PdfOperationType[] = [
   'addImage',
   'redact',
   'replaceText',
+  'sanitize',
   'metadata',
 ] as const;
 
